@@ -1,0 +1,16 @@
+# default
+.DS_Store
+.vscode/
+.claude/
+/subproject/**/resource/
+/subproject/**/datain/
+/subproject/**/dataiss/
+/subproject/**/third_party/
+/subproject/**/include/
+**/*.root
+**/*.pdf
+**/*.exe
+**/.omc
+**/rawdata
+**/sun_processed
+
