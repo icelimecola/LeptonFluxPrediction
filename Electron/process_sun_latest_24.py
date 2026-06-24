@@ -29,13 +29,13 @@ def Print(array):
 # 近地磁场
 BE = np.genfromtxt("../rawdata/omni_m_daily_latest.txt", usecols=8, dtype=float)
 be_daily = BE[17306:22646] # from 2010.5.20 , 140st to 2024.12.31 
-np.save("sun_processed/latest/be_daily_latest.npy", be_daily)
+np.save("../sun_processed/latest/be_daily_latest.npy", be_daily)
 print('be_daily ', be_daily.shape, '  ', be_daily[0], '', be_daily[-1]) #5340
 
 # 太阳风速度
 VSW = np.genfromtxt("../rawdata/omni_m_daily_latest.txt", usecols=9, dtype=float)
 vsw_daily = VSW[17306:22646] #from 2010.5.20 , 140st to 2024.12,31
-np.save("sun_processed/latest/vsw_daily_latest.npy", vsw_daily)
+np.save("../sun_processed/latest/vsw_daily_latest.npy", vsw_daily)
 print('vsw_daily ', vsw_daily.shape, '  ', vsw_daily[0],' ', vsw_daily[-1]) # 5340
 
 # 倾角
@@ -57,7 +57,7 @@ xtilt_daily = np.array(xtilt_daily)
 # 执行线性插值
 tilt_daily = np.interp(xtilt_daily, xtilt_bartel, tilt_bartel[:]['tilt'])
 tilt_daily = np.round(tilt_daily[1:1+5340],1) #from 2010.5.20 to 2024.12.31
-np.save("sun_processed/latest/tilt_daily_latest.npy", tilt_daily)
+np.save("../sun_processed/latest/tilt_daily_latest.npy", tilt_daily)
 print('tilt_daily ', tilt_daily.shape)
 
 # 太阳极化
@@ -96,7 +96,7 @@ def sigmoid(x, k=0.03, x0=0):
 xsp_daily = np.arange(len(sp_daily))
 print(sp_daily[1022], sp_daily[1023], sp_daily[4872], sp_daily[4873])
 sp_daily_sigmoid = -1+2*sigmoid(xsp_daily, k=0.03, x0=1022)-2*sigmoid(xsp_daily, k=0.03, x0=4872)
-np.save("sun_processed/latest/sp_daily_sigmoid_latest.npy", sp_daily_sigmoid)
+np.save("../sun_processed/latest/sp_daily_sigmoid_latest.npy", sp_daily_sigmoid)
 print('sp_daily ', sp_daily_sigmoid.shape,'  ', sp[0],'  ', sp[-1])
 
 # 太阳黑子数
@@ -104,7 +104,7 @@ SSN=pd.read_csv("../rawdata/SSN_d_tot_V2.0_latest.csv", sep=';')
 ssn = SSN.values
 ssn_daily = ssn[70265:75605,4] # # from 2010.5.20 to 2024.12.31
 # 保存为numpy文件（保留数据类型）
-np.save("sun_processed/latest/ssn_daily_latest.npy", ssn_daily)
+np.save("../sun_processed/latest/ssn_daily_latest.npy", ssn_daily)
 print('ssn_daily ', ssn_daily.shape,'  ', ssn_daily[0],'  ',ssn_daily[-1]) # 5340
 
 Be_daily = np.reshape(be_daily,[-1,1])
@@ -114,8 +114,8 @@ Sp_daily = np.reshape(sp_daily_sigmoid,[-1,1])
 Ssn_daily = np.reshape(ssn_daily,[-1,1])
 sun4_daily = np.concatenate([Be_daily,Vsw_daily,Tilt_daily,Sp_daily],axis=1)
 sun5_daily = np.concatenate([Be_daily,Vsw_daily,Tilt_daily,Sp_daily,Ssn_daily],axis=1)
-np.save("sun_processed/latest/sun4_daily_latest.npy", sun4_daily)
-np.save("sun_processed/latest/sun5_daily_latest.npy", sun5_daily) # 5340
+np.save("../sun_processed/latest/sun4_daily_latest.npy", sun4_daily)
+np.save("../sun_processed/latest/sun5_daily_latest.npy", sun5_daily) # 5340
 
 
 # 包括理论计算2025-01-01 ~ 2031
@@ -156,30 +156,30 @@ for i in range(len(date) - 1):
 xSSN_daily.append(xSSN[-1])  # 添加最后一个原始点
 xSSN_daily = np.array(xSSN_daily)
 SSN_daily = np.interp(xSSN_daily, xSSN, SSN)
-np.save("sun_processed/latest/ssn_daily_predict_latest.npy", SSN_daily)
+np.save("../sun_processed/latest/ssn_daily_predict_latest.npy", SSN_daily)
 print('SSN_daily ', SSN_daily.shape)
 
 
 SP_daily = np.ones(2526) *(-1.0)
-np.save("sun_processed/latest/sp_daily_predict_latest.npy", SP_daily)
+np.save("../sun_processed/latest/sp_daily_predict_latest.npy", SP_daily)
 print('SP_daily ', SP_daily.shape)
 
 xTILT_daily.append(xTILT[-1])  # 添加最后一个原始点
 xTILT_daily = np.array(xTILT_daily)
 TILT_daily = np.interp(xTILT_daily, xTILT, TILT)
-np.save("sun_processed/latest/tilt_daily_predict_latest.npy", TILT_daily)
+np.save("../sun_processed/latest/tilt_daily_predict_latest.npy", TILT_daily)
 print('TILT_daily ', TILT_daily.shape)
 
 xVSW_daily.append(xVSW[-1])  # 添加最后一个原始点
 xVSW_daily = np.array(xVSW_daily)
 VSW_daily = np.interp(xVSW_daily, xVSW, VSW)
-np.save("sun_processed/latest/vsw_daily_predict_latest.npy", VSW_daily)
+np.save("../sun_processed/latest/vsw_daily_predict_latest.npy", VSW_daily)
 print('VSW_daily ', VSW_daily.shape)
 
 xBE_daily.append(xBE[-1])  # 添加最后一个原始点
 xBE_daily = np.array(xBE_daily)
 BE_daily = np.interp(xBE_daily, xBE, BE)
-np.save("sun_processed/latest/be_daily_predict_latest.npy", BE_daily)
+np.save("../sun_processed/latest/be_daily_predict_latest.npy", BE_daily)
 print('BE_daily ', BE_daily.shape)
 
 BE_daily_predict   = np.reshape(BE_daily,  [-1,1])
@@ -196,8 +196,8 @@ sun5_daily_predict = np.concatenate([BE_daily_predict,
                                      TILT_daily_predict,
                                      SP_daily_predict,
                                      SSN_daily_predict],axis=1)
-np.save("sun_processed/latest/sun4_daily_predict_latest.npy", sun4_daily_predict)
-np.save("sun_processed/latest/sun5_daily_predict_latest.npy", sun5_daily_predict) #2526
+np.save("../sun_processed/latest/sun4_daily_predict_latest.npy", sun4_daily_predict)
+np.save("../sun_processed/latest/sun5_daily_predict_latest.npy", sun5_daily_predict) #2526
 
 
 sun4_daily_all = np.concatenate([sun4_daily, sun4_daily_predict], axis=0)
@@ -205,8 +205,8 @@ sun5_daily_all = np.concatenate([sun5_daily, sun5_daily_predict], axis=0)
 
 print(sun5_daily.shape, '  ', sun5_daily_predict.shape,'  ',sun5_daily_all.shape) #7866
 
-np.save("sun_processed/latest/sun4_daily_all_latest.npy", sun4_daily_all)
-np.save("sun_processed/latest/sun5_daily_all_latest.npy", sun5_daily_all)
+np.save("../sun_processed/latest/sun4_daily_all_latest.npy", sun4_daily_all)
+np.save("../sun_processed/latest/sun5_daily_all_latest.npy", sun5_daily_all)
 
 import matplotlib.pyplot as plt
 import numpy as np
