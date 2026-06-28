@@ -195,47 +195,45 @@ for i in range(n_bins):
 # 10. 保存 npy
 # =====================================================
 import os
-os.makedirs("flux_processed", exist_ok=True)
-os.makedirs("./Figure/data", exist_ok=True)
+os.makedirs("Data/flux", exist_ok=True)
+os.makedirs("Figure/flux", exist_ok=True)
 
-np.save("flux_processed/electron_flux_allbin.npy", flux_filled)
-np.save("flux_processed/electron_flux_abs_error_allbin.npy", abs_error)
-np.save("flux_processed/electron_flux_rela_error_allbin.npy", rela_error)
-np.save("flux_processed/electron_flux_ave_allbin.npy", flux_ave)
+np.save("Data/flux/electron_flux_allbin.npy", flux_filled)
+np.save("Data/flux/electron_flux_abs_error_allbin.npy", abs_error)
+np.save("Data/flux/electron_flux_rela_error_allbin.npy", rela_error)
+np.save("Data/flux/electron_flux_ave_allbin.npy", flux_ave)
+np.save("Data/flux/electron_energy_edges.npy", y_edges_kept)
 
 print("\nSaved:")
-print(f"  flux_processed/electron_flux_allbin.npy            {flux_filled.shape}")
-print(f"  flux_processed/electron_flux_abs_error_allbin.npy  {abs_error.shape}")
-print(f"  flux_processed/electron_flux_rela_error_allbin.npy {rela_error.shape}")
-print(f"  flux_processed/electron_flux_ave_allbin.npy        {flux_ave.shape}")
+print(f"  Data/flux/electron_flux_allbin.npy            {flux_filled.shape}")
+print(f"  Data/flux/electron_flux_abs_error_allbin.npy  {abs_error.shape}")
+print(f"  Data/flux/electron_flux_rela_error_allbin.npy {rela_error.shape}")
+print(f"  Data/flux/electron_flux_ave_allbin.npy        {flux_ave.shape}")
+print(f"  Data/flux/electron_energy_edges.npy           {y_edges_kept.shape}")
 
 # =====================================================
-# 11. 画图 (最低能档)
+# 11. 画图 (4 代表能档: ~1, 2, 5, 10 GeV, 2×2)
 # =====================================================
+energy_centers = 0.5 * (y_edges_kept[:-1] + y_edges_kept[1:])
+targets = [1.0, 2.0, 5.0, 10.0]
+plot_bins = [int(np.argmin(np.abs(energy_centers - t))) for t in targets]
 
-fig, ax = plt.subplots(1, 1, figsize=(16, 4))
-ax.plot(idx, flux_filled[:, 0], lw=0.5)
-ax.set_title(f'Electron flux [{y_edges_kept[0]:.2f}, {y_edges_kept[1]:.2f}] GeV')
-ax.set_xlabel('Year')
-ax.set_ylabel('Flux')
-plt.savefig('./Figure/data/electron_flux_lowest_bin.pdf', bbox_inches='tight')
+plt.rcParams['axes.labelsize'] = 11
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+
+fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
+for j, bi in enumerate(plot_bins):
+    ax = axs[j // 2, j % 2]
+    ax.plot(idx, flux_filled[:, bi], lw=0.5)
+    ax.set_title(f'{energy_centers[bi]:.2f} GeV  [{y_edges_kept[bi]:.2f}–{y_edges_kept[bi+1]:.2f}] GeV', fontsize=11)
+    ax.set_ylabel('Flux')
+
+plt.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.08, wspace=0.08, hspace=0.15)
+fig.supxlabel('Year', y=0.03, fontsize=13)
+fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
+plt.savefig('Figure/flux/electron_flux_overview.pdf', bbox_inches='tight')
 plt.close()
 
-fig, ax = plt.subplots(1, 1, figsize=(16, 4))
-ax.plot(idx, abs_error[:, 0], lw=0.5)
-ax.set_title(f'Electron flux abs error [{y_edges_kept[0]:.2f}, {y_edges_kept[1]:.2f}] GeV')
-ax.set_xlabel('Year')
-ax.set_ylabel('Abs error')
-plt.savefig('./Figure/data/electron_abs_error_lowest_bin.pdf', bbox_inches='tight')
-plt.close()
-
-fig, ax = plt.subplots(1, 1, figsize=(16, 4))
-ax.plot(idx, rela_error[:, 0], lw=0.5)
-ax.set_title(f'Electron flux rela error [{y_edges_kept[0]:.2f}, {y_edges_kept[1]:.2f}] GeV')
-ax.set_xlabel('Year')
-ax.set_ylabel('Relative error')
-plt.savefig('./Figure/data/electron_rela_error_lowest_bin.pdf', bbox_inches='tight')
-plt.close()
-
-print("\nPlots saved to ./Figure/data/")
+print("\nPlots saved to Figure/flux/")
 print("Done ✅")
