@@ -17,7 +17,7 @@ args = parser.parse_args()
 with open(args.config, 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
 
-print('config: neutron ', 
+print('config: electron ',
             config['epoch_begin'],'epoch_begin ',
             config['epochs'],'epochs ',
             config['learning_rate'],'learning_rate ',
@@ -40,20 +40,19 @@ dropout   = config['dropout']
 
 
 # 载入太阳和流强数据
-sun_daily   = np.load('./sun_processed/19990101_20250601/sun5_daily_all.npy')
-neutron_daily  = np.load('./flux_processed/19990101_20250601/neutron12_imputed.npy')
+sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
+electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
 
-print('sun daily all lastet : ', sun_daily.shape) 
-print('neutron flux daily : ',   neutron_daily.shape)  
-#sun_daily = sun_daily[:15861]
-#
-# 取log 减小不同bin之间的差距
-#neutron_daily = np.log10(neutron_daily)
-number = neutron_daily.shape[0]
-bins = neutron_daily.shape[1]
+print('sun daily all latest : ', sun_daily.shape)
+print('electron flux daily : ',  electron_daily.shape)
+
+# sun 从 2010-05-20 开始, electron 从 2011-06-11 开始, 相差 387 天
+sun_offset = 387
+number = electron_daily.shape[0]
+bins = electron_daily.shape[1]
 print('number = ', number, 'bins = ', bins)
 # 只组合观测数据(number, 5+bins)
-Series = np.concatenate([sun_daily[:number], neutron_daily], axis=1)
+Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
 print('Series = ', Series.shape)
 
 # 定义训练、验证和测试集 ---------------|---|---|
@@ -142,7 +141,7 @@ model.summary()
 
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, Callback, EarlyStopping
 
-checkpoint = ModelCheckpoint('./Model/lstm_sun5_all_mbin/n12/'
+checkpoint = ModelCheckpoint('./Model/'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(learning_rate)+'learningRate_'
@@ -218,7 +217,7 @@ plt.title('model loss')
 plt.ylabel('loss')
 plt.xlabel('epoch')
 plt.legend(['train', 'valid'], loc='upper left')
-plt.savefig('./Figure/lstm_sun5_all_mbin/loss_'
+plt.savefig('./Figure/lstm/loss_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(neurons)+'neurons_'
