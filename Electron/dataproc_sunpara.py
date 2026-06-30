@@ -264,8 +264,9 @@ plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
 # 显示图表
 plt.show()
-plt.savefig('./Figure/data/sun5_latest_24.pdf')
-
+import os
+os.makedirs('./Figure/sunpara', exist_ok=True)
+plt.savefig('./Figure/sunpara/sun5_latest_24.pdf')
 
 
 

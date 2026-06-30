@@ -129,7 +129,7 @@ from tensorflow.keras.models import load_model
 # 8. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
-    model = load_model('./Model/' + m)
+    model = load_model('./Data/model/' + m)
 
     # --- 训练集预测 ---
     train_pred_mean   = model.predict(X_train_seq)

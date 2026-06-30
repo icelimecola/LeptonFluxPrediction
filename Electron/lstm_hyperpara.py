@@ -4,7 +4,10 @@ import yaml
 import glob
 import os
 
-pattern = "./YAML/*.yaml"  # 也可以是 "C:/path/to/files/*.log", "**/*.bak" 等
+config_dir = "./Data/hyperpara"
+os.makedirs(config_dir, exist_ok=True)
+
+pattern = f"{config_dir}/*.yaml"  # 也可以是 "C:/path/to/files/*.log", "**/*.bak" 等
 files_to_delete = glob.glob(pattern)
 
 for file_path in files_to_delete:
@@ -34,5 +37,5 @@ param_combinations = list(itertools.product(*param_grid.values()))
 # 为每个组合创建配置文件
 for i, combination in enumerate(param_combinations):
     params = dict(zip(param_grid.keys(), combination))
-    with open(f"YAML/paras_{i}.yaml", 'w') as file_e:
+    with open(f"{config_dir}/paras_{i}.yaml", 'w') as file_e:
         yaml.dump(params, file_e)

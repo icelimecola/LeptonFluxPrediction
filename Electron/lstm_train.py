@@ -148,7 +148,7 @@ model.summary()
 
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, Callback, EarlyStopping
 
-checkpoint = ModelCheckpoint('./Model/'
+checkpoint = ModelCheckpoint('./Data/model/'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(learning_rate)+'learningRate_'
@@ -234,5 +234,4 @@ plt.savefig('./Figure/lstm/loss_'
         +str(batch_size)+'batchSize'
         +'.pdf', bbox_inches='tight')
 plt.close()
-
 

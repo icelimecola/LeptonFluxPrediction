@@ -14,8 +14,8 @@ module load cuda-12.2
 
 cd /public/home/wxu.ams/LeptonFluxPrediction/Electron
 
-mkdir -p Model Figure/lstm
+mkdir -p Data/model Figure/lstm
 
-~/miniconda3/envs/prediction/bin/python lstm_train.py --config YAML/paras_NUM.yaml
+~/miniconda3/envs/prediction/bin/python lstm_train.py --config Data/hyperpara/paras_NUM.yaml
 
 rm .hostfile*
