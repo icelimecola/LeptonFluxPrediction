@@ -46,11 +46,18 @@ electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
 
-# sun 从 2010-05-20 开始, electron 从 2011-06-11 开始, 相差 387 天
-sun_offset = 387
+# 电子前补 365 天零 → 让 sun 参数更早进入历史窗口
+pad_days  = 365
+electron_daily = np.concatenate([np.zeros([pad_days, electron_daily.shape[1]]), electron_daily])
+
+# 自动计算 sun offset: sun 从 2010-05-20 起, 补零后电子从 2010-06-11 起
+flux_start = pd.Timestamp('2011-06-11') - pd.Timedelta(days=pad_days)
+sun_start  = pd.Timestamp('2010-05-20')
+sun_offset = (flux_start - sun_start).days  # 22
+
 number = electron_daily.shape[0]
-bins = electron_daily.shape[1]
-print('number = ', number, 'bins = ', bins)
+bins   = electron_daily.shape[1]
+print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
 # 只组合观测数据(number, 5+bins)
 Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
 print('Series = ', Series.shape)

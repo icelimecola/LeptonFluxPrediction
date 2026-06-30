@@ -19,8 +19,15 @@ electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
 
-# sun 从 2010-05-20 开始, electron 从 2011-06-11 开始, 相差 387 天
-sun_offset = 387
+# 电子前补 365 天零
+pad_days  = 365
+electron_daily = np.concatenate([np.zeros([pad_days, electron_daily.shape[1]]), electron_daily])
+
+# 自动计算 sun offset
+flux_start = pd.Timestamp('2011-06-11') - pd.Timedelta(days=pad_days)
+sun_start  = pd.Timestamp('2010-05-20')
+sun_offset = (flux_start - sun_start).days
+
 number = electron_daily.shape[0]
 bins = electron_daily.shape[1]
 
@@ -28,7 +35,7 @@ look_back  = 365
 n_features = bins + 5
 train_num  = 0.6
 val_num    = 0.2
-print('number = ', number, 'bins = ', bins)
+print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
 
 # 只组合观测数据
 Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
@@ -112,7 +119,8 @@ print(X_train_seq.shape, y_train_seq.shape,
 # 7. 模型列表 — 填入最佳模型
 # =====================================================
 model_list = [
-    '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
+    # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
+    '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
 ]
 
 from tensorflow.keras.models import load_model
@@ -186,7 +194,7 @@ for m in model_list:
         bin_labels.append('%.2f GeV  [%.2f–%.2f]' % (
             energy_centers[bi], energy_edges[bi], energy_edges[bi+1]))
 
-    idx = pd.date_range(start="2010-05-20", end="2031-12-01")
+    idx = pd.date_range(start="2010-06-11", end="2031-12-01")
 
     plt.rcParams['axes.labelsize']  = 11
     plt.rcParams['xtick.labelsize'] = 10
@@ -196,13 +204,13 @@ for m in model_list:
     fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
     for j, bi in enumerate(plot_bins):
         ax = axs[j // 2, j % 2]
-        ax.plot(idx[0:train_end],           train_true_origin[:, bi], 'g-', lw=0.8)
-        ax.plot(idx[train_end:val_end],       val_true_origin[:, bi], 'g-', lw=0.8)
-        ax.plot(idx[val_end:test_end],       test_true_origin[:, bi], 'g-', lw=0.8)
-        ax.plot(idx[look_back:train_end],   train_pred_origin[:, bi], 'b-', lw=0.5)
-        ax.plot(idx[train_end:val_end],       val_pred_origin[:, bi], 'y-', lw=0.5)
-        ax.plot(idx[val_end:test_end],       test_pred_origin[:, bi], 'm-', lw=0.5)
-        ax.plot(idx[test_end:future_end],  future_pred_origin[:, bi], 'r-', lw=0.5)
+        ax.plot(idx[look_back:train_end], train_true_origin[look_back:, bi], 'g-', lw=0.8)
+        ax.plot(idx[train_end:val_end],     val_true_origin[:, bi], 'g-', lw=0.8)
+        ax.plot(idx[val_end:test_end],     test_true_origin[:, bi], 'g-', lw=0.8)
+        ax.plot(idx[look_back:train_end],  train_pred_origin[:, bi], 'b-', lw=0.5)
+        ax.plot(idx[train_end:val_end],      val_pred_origin[:, bi], 'y-', lw=0.5)
+        ax.plot(idx[val_end:test_end],      test_pred_origin[:, bi], 'm-', lw=0.5)
+        ax.plot(idx[test_end:future_end], future_pred_origin[:, bi], 'r-', lw=0.5)
         ax.text(0.02, 0.88, bin_labels[j], transform=ax.transAxes, fontsize=11, fontweight='bold')
 
         split_style = dict(color='0.3', ls=':', lw=1.0, alpha=0.7, zorder=0)
