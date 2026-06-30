@@ -14,6 +14,6 @@ module load cuda-12.2
 
 cd /public/home/wxu.ams/LeptonFluxPrediction/Electron
 
-~/miniconda3/envs/prediction/bin/python draw_lstm_sun5_all_mbin.py
+~/miniconda3/envs/prediction/bin/python lstm_draw.py
 
 rm .hostfile*

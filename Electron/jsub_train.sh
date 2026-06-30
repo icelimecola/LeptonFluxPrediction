@@ -16,6 +16,6 @@ cd /public/home/wxu.ams/LeptonFluxPrediction/Electron
 
 mkdir -p Model Figure/lstm
 
-~/miniconda3/envs/prediction/bin/python lstm_sun5_all_mbin.py --config YAML/paras_NUM.yaml
+~/miniconda3/envs/prediction/bin/python lstm_train.py --config YAML/paras_NUM.yaml
 
 rm .hostfile*
