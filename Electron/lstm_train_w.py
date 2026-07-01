@@ -252,7 +252,7 @@ plt.yscale('log')
 plt.title('model loss')
 plt.ylabel('loss')
 plt.xlabel('epoch')
-plt.legend(['train', 'valid'], loc='upper left')
+plt.legend(['training', 'validation', 'test'], loc='upper left')
 plt.savefig('./Figure/lstm/loss_errWeighted_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'

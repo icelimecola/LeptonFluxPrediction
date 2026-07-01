@@ -223,7 +223,7 @@ plt.yscale('log')
 plt.title('model loss')
 plt.ylabel('loss')
 plt.xlabel('epoch')
-plt.legend(['train', 'valid'], loc='upper left')
+plt.legend(['training', 'validation', 'test'], loc='upper left')
 plt.savefig('./Figure/lstm/loss_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
@@ -234,4 +234,3 @@ plt.savefig('./Figure/lstm/loss_'
         +str(batch_size)+'batchSize'
         +'.pdf', bbox_inches='tight')
 plt.close()
-
