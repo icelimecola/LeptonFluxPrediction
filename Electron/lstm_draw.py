@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from pathlib import Path
 
 
 import os
@@ -120,8 +121,21 @@ print(X_train_seq.shape, y_train_seq.shape,
 # =====================================================
 model_list = [
     # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
-    '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
 ]
+
+model_dir = Path('./Data/model')
+best_model_file = model_dir / 'best_model.txt'
+
+if not model_list and best_model_file.exists():
+    best_model = best_model_file.read_text(encoding='utf-8').strip()
+    if best_model:
+        model_list = [best_model]
+
+if not model_list:
+    raise FileNotFoundError(
+        'No model selected. Fill model_list in lstm_draw.py or run '
+        'lstm_select_best_model.py to create Data/model/best_model.txt'
+    )
 
 from tensorflow.keras.models import load_model
 
@@ -129,7 +143,12 @@ from tensorflow.keras.models import load_model
 # 8. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
-    model = load_model('./Data/model/' + m)
+    model = load_model(str(model_dir / m), compile=False)
+    if model.input_shape[-1] != n_features:
+        raise ValueError(
+            f'Model {m} expects {model.input_shape[-1]} features, '
+            f'but current non-weighted workflow builds {n_features}.'
+        )
 
     # --- 训练集预测 ---
     train_pred_mean   = model.predict(X_train_seq)

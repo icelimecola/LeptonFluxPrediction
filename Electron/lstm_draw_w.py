@@ -128,17 +128,19 @@ model_list = [
     # 'errWeighted_0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
 ]
 
-if not model_list:
-    model_list = [
-        p.name for p in sorted(
-            Path('./Data/model').glob('errWeighted_*.keras'),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:1]
-    ]
+model_dir = Path('./Data/modelw')
+best_model_file = model_dir / 'best_model.txt'
+
+if not model_list and best_model_file.exists():
+    best_model = best_model_file.read_text(encoding='utf-8').strip()
+    if best_model:
+        model_list = [best_model]
 
 if not model_list:
-    raise FileNotFoundError('No errWeighted_*.keras model found in ./Data/model')
+    raise FileNotFoundError(
+        'No weighted model selected. Fill model_list in lstm_draw_w.py or run '
+        'lstm_select_best_model_w.py to create Data/modelw/best_model.txt'
+    )
 
 from tensorflow.keras.models import load_model
 
@@ -146,7 +148,7 @@ from tensorflow.keras.models import load_model
 # 8. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
-    model = load_model('./Data/model/' + m, compile=False)
+    model = load_model(str(model_dir / m), compile=False)
     if model.input_shape[-1] != n_features:
         raise ValueError(
             f'Model {m} expects {model.input_shape[-1]} features, '

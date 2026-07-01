@@ -6,6 +6,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import yaml
 import argparse
+import os
 
 
 parser = argparse.ArgumentParser(description="Train a model with specified yaml file.")
@@ -147,6 +148,9 @@ model.compile(optimizer=adamax, loss='huber', metrics=[], weighted_metrics=[])
 model.summary()
 
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, Callback, EarlyStopping
+
+os.makedirs('./Data/model', exist_ok=True)
+os.makedirs('./Figure/lstm', exist_ok=True)
 
 checkpoint = ModelCheckpoint('./Data/model/'
         +str(epoch_begin)+'-'
