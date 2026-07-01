@@ -221,11 +221,12 @@ plot_bins = [int(np.argmin(np.abs(energy_centers - t))) for t in targets]
 plt.rcParams['axes.labelsize'] = 11
 plt.rcParams['xtick.labelsize'] = 10
 plt.rcParams['ytick.labelsize'] = 10
+flux_color = 'tab:blue'
 
 fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
 for j, bi in enumerate(plot_bins):
     ax = axs[j // 2, j % 2]
-    ax.plot(idx, flux_filled[:, bi], lw=0.5)
+    ax.plot(idx, flux_filled[:, bi], color=flux_color, lw=0.5)
     ax.set_title(f'{energy_centers[bi]:.2f} GeV  [{y_edges_kept[bi]:.2f}–{y_edges_kept[bi+1]:.2f}] GeV', fontsize=11)
     ax.set_ylabel('Flux')
 
@@ -233,6 +234,38 @@ plt.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.08, wspace=0.08, h
 fig.supxlabel('Year', y=0.03, fontsize=13)
 fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
 plt.savefig('Figure/flux/electron_flux_overview.pdf', bbox_inches='tight')
+plt.close()
+
+fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
+for j, bi in enumerate(plot_bins):
+    ax = axs[j // 2, j % 2]
+    ax.plot(idx, flux_filled[:, bi], '.', color=flux_color, markersize=1.5)
+    ax.set_title(f'{energy_centers[bi]:.2f} GeV  [{y_edges_kept[bi]:.2f}–{y_edges_kept[bi+1]:.2f}] GeV', fontsize=11)
+    ax.set_ylabel('Flux')
+
+plt.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.08, wspace=0.08, hspace=0.15)
+fig.supxlabel('Year', y=0.03, fontsize=13)
+fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
+plt.savefig('Figure/flux/electron_flux_overview_points.pdf', bbox_inches='tight')
+plt.close()
+
+fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
+for j, bi in enumerate(plot_bins):
+    ax = axs[j // 2, j % 2]
+    flux = flux_filled[:, bi]
+    err = abs_error[:, bi]
+
+    ax.errorbar(idx, flux, yerr=err,
+                fmt='.', markersize=1.5, elinewidth=0.45, capsize=0,
+                color='green', ecolor='green', alpha=0.35,
+                zorder=0, label='Flux ± error')
+    ax.set_title(f'{energy_centers[bi]:.2f} GeV  [{y_edges_kept[bi]:.2f}–{y_edges_kept[bi+1]:.2f}] GeV', fontsize=11)
+    ax.set_ylabel('Flux')
+
+plt.subplots_adjust(left=0.08, right=0.97, top=0.95, bottom=0.08, wspace=0.08, hspace=0.15)
+fig.supxlabel('Year', y=0.03, fontsize=13)
+fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
+plt.savefig('Figure/flux/electron_flux_overview_with_error.pdf', bbox_inches='tight')
 plt.close()
 
 print("\nPlots saved to Figure/flux/")
