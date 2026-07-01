@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p jobs JSUB/error JSUB/output JSUB/JSUBs Data/model Data/lstm2 Figure/lstm2
+mkdir -p jobs JSUB/error JSUB/output JSUB/JSUBs Data/model Data/lstmdraw Figure/lstmdraw
 
 sed "s/NUM/0/g" jsub_draw.sh > JSUB/JSUBs/jsub_draw_0.sh
 chmod +x JSUB/JSUBs/jsub_draw_0.sh

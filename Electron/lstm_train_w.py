@@ -173,7 +173,7 @@ model.summary()
 
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, Callback, EarlyStopping
 os.makedirs('./Data/modelw', exist_ok=True)
-os.makedirs('./Figure/lstm', exist_ok=True)
+os.makedirs('./Figure/lstmtrainw', exist_ok=True)
 
 checkpoint = ModelCheckpoint('./Data/modelw/'
         +'errWeighted_'
@@ -253,7 +253,7 @@ plt.title('model loss')
 plt.ylabel('loss')
 plt.xlabel('epoch')
 plt.legend(['training', 'validation', 'test'], loc='upper left')
-plt.savefig('./Figure/lstm/loss_errWeighted_'
+plt.savefig('./Figure/lstmtrainw/loss_errWeighted_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(neurons)+'neurons_'
