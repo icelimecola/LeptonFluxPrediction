@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 import os
-os.makedirs('./Data/lstm2', exist_ok=True)
-os.makedirs('./Figure/lstm2', exist_ok=True)
+os.makedirs('./Data/lstmdraww', exist_ok=True)
+os.makedirs('./Figure/lstmdraww', exist_ok=True)
 
 # =====================================================
 # 1. 载入太阳和流强数据
@@ -56,10 +56,13 @@ print('train_end, val_end, test_end, future_end:', train_end, val_end, test_end,
 
 X_train = Series[0:train_end, :]
 y_train = Series[0:train_end, 5:5+bins]
+err_train_origin = Series[0:train_end, 5+bins:]
 X_val   = Series[train_end-look_back:val_end, :]
 y_val   = Series[train_end-look_back:val_end, 5:5+bins]
+err_val_origin = Series[train_end-look_back:val_end, 5+bins:]
 X_test  = Series[val_end-look_back:test_end, :]
 y_test  = Series[val_end-look_back:test_end, 5:5+bins]
+err_test_origin = Series[val_end-look_back:test_end, 5+bins:]
 
 # =====================================================
 # 3. 随机种子
@@ -173,7 +176,7 @@ for m in model_list:
     test_true_origin = scaler_flux.inverse_transform(y_test[look_back:, :])
     test_rme = np.mean(np.abs(test_pred_origin - test_true_origin) / test_true_origin)
 
-    print('mean relative error : train', train_rme, ', validation', val_rme, ', testing', test_rme)
+    print('mean relative error : training', train_rme, ', validation', val_rme, ', test', test_rme)
 
     # --- 计算各段相对误差 ---
     train_error = np.array(train_pred_origin) / np.array(train_true_origin[look_back:]) - 1
@@ -181,9 +184,9 @@ for m in model_list:
     test_error  = np.array(test_pred_origin)  / np.array(test_true_origin) - 1
     print('train error shape =', train_error.shape)
 
-    np.save('./Data/lstm2/train_error_allbin_' + m + '.npy', train_error)
-    np.save('./Data/lstm2/val_error_allbin_'   + m + '.npy', val_error)
-    np.save('./Data/lstm2/test_error_allbin_'  + m + '.npy', test_error)
+    np.save('./Data/lstmdraww/train_error_allbin_' + m + '.npy', train_error)
+    np.save('./Data/lstmdraww/val_error_allbin_'   + m + '.npy', val_error)
+    np.save('./Data/lstmdraww/test_error_allbin_'  + m + '.npy', test_error)
 
     # --- 未来预测 (滑动窗口自回归) ---
     init_batch = Series[number-look_back:number, :n_features].reshape((1, look_back, n_features))
@@ -228,9 +231,18 @@ for m in model_list:
     fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
     for j, bi in enumerate(plot_bins):
         ax = axs[j // 2, j % 2]
-        ax.plot(idx[look_back:train_end], train_true_origin[look_back:, bi], 'g-', lw=0.8)
-        ax.plot(idx[train_end:val_end],     val_true_origin[:, bi], 'g-', lw=0.8)
-        ax.plot(idx[val_end:test_end],     test_true_origin[:, bi], 'g-', lw=0.8)
+        ax.errorbar(idx[look_back:train_end], train_true_origin[look_back:, bi],
+                    yerr=err_train_origin[look_back:, bi], fmt='.', color='g',
+                    ecolor='g', markersize=1.8, elinewidth=0.45, capsize=0,
+                    alpha=0.65, zorder=1)
+        ax.errorbar(idx[train_end:val_end], val_true_origin[:, bi],
+                    yerr=err_val_origin[look_back:, bi], fmt='.', color='g',
+                    ecolor='g', markersize=1.8, elinewidth=0.45, capsize=0,
+                    alpha=0.65, zorder=1)
+        ax.errorbar(idx[val_end:test_end], test_true_origin[:, bi],
+                    yerr=err_test_origin[look_back:, bi], fmt='.', color='g',
+                    ecolor='g', markersize=1.8, elinewidth=0.45, capsize=0,
+                    alpha=0.65, zorder=1)
         ax.plot(idx[look_back:train_end],  train_pred_origin[:, bi], 'b-', lw=0.5)
         ax.plot(idx[train_end:val_end],      val_pred_origin[:, bi], 'y-', lw=0.5)
         ax.plot(idx[val_end:test_end],      test_pred_origin[:, bi], 'm-', lw=0.5)
@@ -252,12 +264,12 @@ for m in model_list:
                 pos_test  = int((val_end + test_end) / 2)
             ax.text(idx[pos_train], 0.03, 'training',   transform=trans, ha='center', va='bottom', fontsize=10)
             ax.text(idx[pos_val],   0.03, 'validation', transform=trans, ha='center', va='bottom', fontsize=10)
-            ax.text(idx[pos_test],  0.03, 'testing',    transform=trans, ha='center', va='bottom', fontsize=10)
+            ax.text(idx[pos_test],  0.03, 'test',       transform=trans, ha='center', va='bottom', fontsize=10)
 
     plt.subplots_adjust(left=0.08, right=0.97, top=0.96, bottom=0.08, wspace=0.06, hspace=0.10)
     fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=14)
     fig.supxlabel('Year', y=0.03, fontsize=14)
-    plt.savefig('./Figure/lstm2/electron_prediction_' + m + '.pdf', bbox_inches='tight')
+    plt.savefig('./Figure/lstmdraww/electron_prediction_' + m + '.pdf', bbox_inches='tight')
     plt.close()
 
     # —— 相对误差, 2×2 ——
@@ -277,7 +289,7 @@ for m in model_list:
     plt.subplots_adjust(left=0.08, right=0.97, top=0.96, bottom=0.08, wspace=0.06, hspace=0.10)
     fig.supylabel('Relative Error', x=0.03, fontsize=14)
     fig.supxlabel('Year', y=0.03, fontsize=14)
-    plt.savefig('./Figure/lstm2/electron_error_' + m + '.pdf', bbox_inches='tight')
+    plt.savefig('./Figure/lstmdraww/electron_error_' + m + '.pdf', bbox_inches='tight')
     plt.close()
 
 print("Done ✅")
