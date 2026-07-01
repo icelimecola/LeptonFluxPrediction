@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from pathlib import Path
 
 
 import os
@@ -15,13 +16,16 @@ os.makedirs('./Figure/lstm2', exist_ok=True)
 # =====================================================
 sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
 electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
+electron_error_daily = np.load('Data/flux/electron_flux_abs_error_allbin.npy')
 
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
+print('electron error daily : ',  electron_error_daily.shape)
 
 # 电子前补 365 天零
 pad_days  = 365
 electron_daily = np.concatenate([np.zeros([pad_days, electron_daily.shape[1]]), electron_daily])
+electron_error_daily = np.concatenate([np.zeros([pad_days, electron_error_daily.shape[1]]), electron_error_daily])
 
 # 自动计算 sun offset
 flux_start = pd.Timestamp('2011-06-11') - pd.Timedelta(days=pad_days)
@@ -32,13 +36,13 @@ number = electron_daily.shape[0]
 bins = electron_daily.shape[1]
 
 look_back  = 365
-n_features = bins + 5
+n_features = 5 + 2*bins
 train_num  = 0.6
 val_num    = 0.2
 print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
 
 # 只组合观测数据
-Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
+Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily, electron_error_daily], axis=1)
 print('Series = ', Series.shape)
 
 # =====================================================
@@ -51,11 +55,11 @@ future_end = sun_daily.shape[0] - sun_offset
 print('train_end, val_end, test_end, future_end:', train_end, val_end, test_end, future_end)
 
 X_train = Series[0:train_end, :]
-y_train = Series[0:train_end, 5:]
+y_train = Series[0:train_end, 5:5+bins]
 X_val   = Series[train_end-look_back:val_end, :]
-y_val   = Series[train_end-look_back:val_end, 5:]
+y_val   = Series[train_end-look_back:val_end, 5:5+bins]
 X_test  = Series[val_end-look_back:test_end, :]
-y_test  = Series[val_end-look_back:test_end, 5:]
+y_test  = Series[val_end-look_back:test_end, 5:5+bins]
 
 # =====================================================
 # 3. 随机种子
@@ -85,11 +89,12 @@ y_test  = scaler_flux.transform(y_test)
 # =====================================================
 # 未来天数 = sun 总长 - (sun 偏移 + electron 天数)
 future_days = sun_daily.shape[0] - (sun_offset + number)
-future_flux = np.concatenate([Series[-look_back:, 5:], np.zeros([future_days, bins])], axis=0)
-padding_tail = np.concatenate([sun_daily[sun_offset+number-look_back:, 0:5], future_flux], axis=1)
+future_flux = np.concatenate([Series[-look_back:, 5:5+bins], np.zeros([future_days, bins])], axis=0)
+future_error = np.concatenate([Series[-look_back:, 5+bins:], np.zeros([future_days, bins])], axis=0)
+padding_tail = np.concatenate([sun_daily[sun_offset+number-look_back:, 0:5], future_flux, future_error], axis=1)
 padding_tail_scaled = scaler.transform(padding_tail)
 X_future = padding_tail_scaled
-y_future = padding_tail_scaled[:, 5:]
+y_future = padding_tail_scaled[:, 5:5+bins]
 
 Series = np.concatenate([X_train, X_val[look_back:, :], X_test[look_back:, :], X_future[look_back:, :]], axis=0)
 
@@ -120,8 +125,20 @@ print(X_train_seq.shape, y_train_seq.shape,
 # =====================================================
 model_list = [
     # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
-    '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
+    # 'errWeighted_0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
 ]
+
+if not model_list:
+    model_list = [
+        p.name for p in sorted(
+            Path('./Data/model').glob('errWeighted_*.keras'),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )[:1]
+    ]
+
+if not model_list:
+    raise FileNotFoundError('No errWeighted_*.keras model found in ./Data/model')
 
 from tensorflow.keras.models import load_model
 
@@ -129,7 +146,12 @@ from tensorflow.keras.models import load_model
 # 8. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
-    model = load_model('./Data/model/' + m)
+    model = load_model('./Data/model/' + m, compile=False)
+    if model.input_shape[-1] != n_features:
+        raise ValueError(
+            f'Model {m} expects {model.input_shape[-1]} features, '
+            f'but current err-weighted workflow builds {n_features}.'
+        )
 
     # --- 训练集预测 ---
     train_pred_mean   = model.predict(X_train_seq)
@@ -170,7 +192,7 @@ for m in model_list:
         if i % 100 == 0:
             print('future step', i, '/', future_end - number)
         future_pred = model.predict(cur_batch, verbose=0)[0]
-        Series[number + i, 5:] = future_pred
+        Series[number + i, 5:5+bins] = future_pred
         future_pred_mean.append(future_pred)
         start = number - look_back + i + 1
         end   = number + i + 1

@@ -42,13 +42,16 @@ dropout   = config['dropout']
 # 载入太阳和流强数据
 sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
 electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
+electron_error_daily = np.load('Data/flux/electron_flux_abs_error_allbin.npy')
 
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
+print('electron error daily : ',  electron_error_daily.shape)
 
 # 电子前补 365 天零 → 让 sun 参数更早进入历史窗口
 pad_days  = 365
 electron_daily = np.concatenate([np.zeros([pad_days, electron_daily.shape[1]]), electron_daily])
+electron_error_daily = np.concatenate([np.zeros([pad_days, electron_error_daily.shape[1]]), electron_error_daily])
 
 # 自动计算 sun offset: sun 从 2010-05-20 起, 补零后电子从 2010-06-11 起
 flux_start = pd.Timestamp('2011-06-11') - pd.Timedelta(days=pad_days)
@@ -58,8 +61,8 @@ sun_offset = (flux_start - sun_start).days  # 22
 number = electron_daily.shape[0]
 bins   = electron_daily.shape[1]
 print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
-# 只组合观测数据(number, 5+bins)
-Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
+# 只组合观测数据(number, 5+flux bins+error bins)
+Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily, electron_error_daily], axis=1)
 print('Series = ', Series.shape)
 
 # 定义训练、验证和测试集 ---------------|---|---|
@@ -71,11 +74,14 @@ print(train_end, val_end, test_end, future_end)
 
 # 后边的训练数据需要加上上一年的太阳数据
 X_train = Series[0:train_end,      0:]  # (0, 70%)
-y_train = Series[0:train_end,      5:]
+y_train = Series[0:train_end,      5:5+bins]
+err_train = Series[0:train_end,    5+bins:]
 X_val = Series[train_end-look_back:val_end,  0:] # (70%, 85%)
-y_val = Series[train_end-look_back:val_end,  5:]
+y_val = Series[train_end-look_back:val_end,  5:5+bins]
+err_val = Series[train_end-look_back:val_end, 5+bins:]
 X_test =  Series[val_end-look_back:test_end, 0:] # (85%, 1)
-y_test =  Series[val_end-look_back:test_end, 5:]
+y_test =  Series[val_end-look_back:test_end, 5:5+bins]
+err_test = Series[val_end-look_back:test_end, 5+bins:]
 
 seed = 42
 import random
@@ -90,6 +96,9 @@ scaler = MinMaxScaler()
 X_train = scaler.fit_transform(X_train)
 X_val = scaler.transform(X_val) # 只缩放
 X_test = scaler.transform(X_test) # 只缩放
+err_train = X_train[:, 5+bins:]
+err_val = X_val[:, 5+bins:]
+err_test = X_test[:, 5+bins:]
 
 scaler_flux = MinMaxScaler()
 y_train = scaler_flux.fit_transform(y_train)
@@ -103,18 +112,22 @@ print(np.isnan(y_val).any(), np.isinf(y_val).any()    )
 
 
 # ================== 序列化函数 ==================
-def make_sequence(X, y, look_back):
-    X_seq, y_seq = [], []
+def make_sequence(X, y, err, look_back):
+    X_seq, y_seq, w_seq = [], [], []
     for i in range(look_back, len(X)):
         X_seq.append(X[i - look_back:i, :])   # 过去 look_back 天特征
         y_seq.append(y[i, :])                 # 预测当天的 flux
-    return np.array(X_seq), np.array(y_seq)
+        w_seq.append(np.exp(-err[i, :]))      # 误差越大，样本权重越低
+    return np.array(X_seq), np.array(y_seq), np.array(w_seq)
 
-X_train_seq, y_train_seq = make_sequence(X_train, y_train, look_back)
-X_val_seq,   y_val_seq   = make_sequence(X_val,   y_val,   look_back)
-X_test_seq,  y_test_seq  = make_sequence(X_test,  y_test,  look_back)
-print(X_train_seq.shape, y_train_seq.shape)
-# → (样本数, look_back, 6) , (样本数,), (样本数,)
+X_train_seq, y_train_seq, w_train = make_sequence(X_train, y_train, err_train, look_back)
+X_val_seq,   y_val_seq,   w_val   = make_sequence(X_val,   y_val,   err_val,   look_back)
+X_test_seq,  y_test_seq,  w_test  = make_sequence(X_test,  y_test,  err_test,  look_back)
+print(X_train_seq.shape, y_train_seq.shape, w_train.shape)
+# → (样本数, look_back, 5+flux bins+error bins) , (样本数,bins), (样本数,bins)
+
+y_train_packed = np.concatenate([y_train_seq, w_train], axis=1)
+y_val_packed = np.concatenate([y_val_seq, w_val], axis=1)
 
 
 import tensorflow as tf
@@ -132,7 +145,7 @@ epochs= config['epochs']
 epoch_end=epoch_begin+epochs
 
 model = Sequential([
-    Input(shape=(look_back, 5+bins), dtype='float32'),
+    Input(shape=(look_back, 5+2*bins), dtype='float32'),
     LSTM(units               = neurons, dropout=dropout,
         kernel_regularizer  = L1L2(l1=0, l2=l2),
         name                = 'LSTM', return_sequences=False  ),
@@ -142,13 +155,28 @@ model = Sequential([
 
 adamax = Adamax(learning_rate = learning_rate, 
         beta_1 = 0.9, beta_2 = 0.999, epsilon = 1e-07)
-model.compile(optimizer=adamax, loss='huber', metrics=[], weighted_metrics=[])
+
+def weighted_huber(y_packed, y_pred, delta=1.0):
+    y_true = y_packed[:, :bins]
+    weight = y_packed[:, bins:]
+
+    abs_error = tf.abs(y_true - y_pred)
+    quadratic = tf.minimum(abs_error, delta)
+    linear = abs_error - quadratic
+    loss = 0.5 * tf.square(quadratic) + delta * linear
+    return tf.reduce_mean(loss * weight)
+
+model.compile(optimizer=adamax, loss=weighted_huber, metrics=[], weighted_metrics=[])
 #model.compile(optimizer=adamax, loss='huber')
 model.summary()
 
 from tensorflow.keras.callbacks import CSVLogger, ModelCheckpoint, Callback, EarlyStopping
+import os
+os.makedirs('./Data/model', exist_ok=True)
+os.makedirs('./Figure/lstm', exist_ok=True)
 
 checkpoint = ModelCheckpoint('./Data/model/'
+        +'errWeighted_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(learning_rate)+'learningRate_'
@@ -164,10 +192,11 @@ checkpoint = ModelCheckpoint('./Data/model/'
         mode='auto')
 
 class TestLossCallback(tf.keras.callbacks.Callback):
-    def __init__(self, X_test, y_test_true, delta=1.0):
+    def __init__(self, X_test, y_test_true, test_weights, delta=1.0):
         super().__init__()
         self.X_test = X_test
         self.y_test_true = tf.constant(y_test_true, dtype=tf.float32)
+        self.test_weights = tf.constant(test_weights, dtype=tf.float32)
         self.delta = delta
         self.loss = []
 
@@ -180,7 +209,7 @@ class TestLossCallback(tf.keras.callbacks.Callback):
         quadratic = tf.minimum(abs_error, self.delta)
         linear = abs_error - quadratic
         loss = 0.5 * tf.square(quadratic) + self.delta * linear  # (batch, 8)
-        test_loss = tf.reduce_mean(loss).numpy()
+        test_loss = tf.reduce_mean(loss * self.test_weights).numpy()
 
         # MSE: (y_true - y_pred)^2
         #mse = tf.square(self.y_test_true - y_pred)   # (batch, channels)
@@ -192,7 +221,7 @@ class TestLossCallback(tf.keras.callbacks.Callback):
         logs['test_loss'] = test_loss
 
 
-test_callback = TestLossCallback(X_test_seq, y_test_seq)
+test_callback = TestLossCallback(X_test_seq, y_test_seq, w_test)
 
 
 early_stop = EarlyStopping(
@@ -206,8 +235,8 @@ early_stop = EarlyStopping(
 
 
 history = model.fit(
-        X_train_seq, y_train_seq,
-        validation_data=(X_val_seq, y_val_seq),
+        X_train_seq, y_train_packed,
+        validation_data=(X_val_seq, y_val_packed),
         epochs= epochs,
         batch_size= batch_size,
         callbacks=[checkpoint, test_callback, early_stop],
@@ -224,7 +253,7 @@ plt.title('model loss')
 plt.ylabel('loss')
 plt.xlabel('epoch')
 plt.legend(['train', 'valid'], loc='upper left')
-plt.savefig('./Figure/lstm/loss_'
+plt.savefig('./Figure/lstm/loss_errWeighted_'
         +str(epoch_begin)+'-'
         +str(epoch_end)+'epoch_'
         +str(neurons)+'neurons_'
@@ -234,4 +263,3 @@ plt.savefig('./Figure/lstm/loss_'
         +str(batch_size)+'batchSize'
         +'.pdf', bbox_inches='tight')
 plt.close()
-
