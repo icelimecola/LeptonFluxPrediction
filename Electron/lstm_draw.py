@@ -134,7 +134,7 @@ if not model_list and best_model_file.exists():
 if not model_list:
     raise FileNotFoundError(
         'No model selected. Fill model_list in lstm_draw.py or run '
-        'lstm_select_best_model.py to create Data/model/best_model.txt'
+        'lstm_bestmodel.py to create Data/model/best_model.txt'
     )
 
 from tensorflow.keras.models import load_model

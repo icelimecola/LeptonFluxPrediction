@@ -142,7 +142,7 @@ if not model_list and best_model_file.exists():
 if not model_list:
     raise FileNotFoundError(
         'No weighted model selected. Fill model_list in lstm_draw_w.py or run '
-        'lstm_select_best_model_w.py to create Data/modelw/best_model.txt'
+        'lstm_bestmodel_w.py to create Data/modelw/best_model.txt'
     )
 
 from tensorflow.keras.models import load_model
