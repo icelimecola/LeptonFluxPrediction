@@ -218,6 +218,51 @@ energy_centers = 0.5 * (y_edges_kept[:-1] + y_edges_kept[1:])
 targets = [1.0, 2.0, 5.0, 10.0]
 plot_bins = [int(np.argmin(np.abs(energy_centers - t))) for t in targets]
 
+
+def bin_title(bi):
+    return f'{energy_centers[bi]:.2f} GeV  [{y_edges_kept[bi]:.2f}-{y_edges_kept[bi+1]:.2f}] GeV'
+
+
+def write_flux_html(output_path, trace_mode='lines', with_error=False):
+    from tool_plotlyhtml import make_trace, write_plotly_panels
+
+    panels = []
+    for j, bi in enumerate(plot_bins):
+        title = bin_title(bi)
+        flux = flux_filled[:, bi]
+        err = abs_error[:, bi]
+        color = 'green' if with_error else '#1f77b4'
+        hovertemplate = (
+            f'{title}<br>'
+            'date=%{x|%Y-%m-%d}<br>'
+            'flux=%{y:.6g}'
+        )
+        customdata = None
+        error_y = None
+        if with_error:
+            hovertemplate += '<br>error=%{customdata:.6g}'
+            customdata = err
+            error_y = err
+        hovertemplate += '<extra></extra>'
+
+        panels.append({
+            'title': title,
+            'traces': [
+                make_trace(
+                    'flux', idx, flux, mode=trace_mode, color=color,
+                    marker_size=3, width=0.8,
+                    error_y=error_y, customdata=customdata,
+                    hovertemplate=hovertemplate,
+                    showlegend=(j == 0),
+                )
+            ],
+        })
+    write_plotly_panels(
+        output_path, 'Electron Flux Overview', panels,
+        columns=2,
+        yaxis_title='Electron Flux [m^-2 s^-1 sr^-1 (GeV/n)^-1]',
+    )
+
 plt.rcParams['axes.labelsize'] = 11
 plt.rcParams['xtick.labelsize'] = 10
 plt.rcParams['ytick.labelsize'] = 10
@@ -235,6 +280,7 @@ fig.supxlabel('Year', y=0.03, fontsize=13)
 fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
 plt.savefig('Figure/flux/electron_flux_overview.pdf', bbox_inches='tight')
 plt.close()
+write_flux_html('Figure/flux/electron_flux_overview.html', trace_mode='lines', with_error=False)
 
 fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
 for j, bi in enumerate(plot_bins):
@@ -248,6 +294,7 @@ fig.supxlabel('Year', y=0.03, fontsize=13)
 fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
 plt.savefig('Figure/flux/electron_flux_overview_points.pdf', bbox_inches='tight')
 plt.close()
+write_flux_html('Figure/flux/electron_flux_overview_points.html', trace_mode='markers', with_error=False)
 
 fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
 for j, bi in enumerate(plot_bins):
@@ -267,6 +314,7 @@ fig.supxlabel('Year', y=0.03, fontsize=13)
 fig.supylabel('Electron Flux  [m$^{-2}$ s$^{-1}$ sr$^{-1}$ (GeV/n)$^{-1}$]', x=0.03, fontsize=13)
 plt.savefig('Figure/flux/electron_flux_overview_with_error.pdf', bbox_inches='tight')
 plt.close()
+write_flux_html('Figure/flux/electron_flux_overview_with_error.html', trace_mode='markers', with_error=True)
 
 print("\nPlots saved to Figure/flux/")
 print("Done ✅")

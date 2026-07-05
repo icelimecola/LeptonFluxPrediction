@@ -116,6 +116,81 @@ print(X_train_seq.shape, y_train_seq.shape,
       X_val_seq.shape,   y_val_seq.shape,
       X_test_seq.shape,  y_test_seq.shape)
 
+
+def write_prediction_html(output_path, idx, plot_bins, bin_labels,
+                          train_true, val_true, test_true,
+                          train_pred, val_pred, test_pred, future_pred):
+    from tool_plotlyhtml import make_trace, write_plotly_panels
+
+    panels = []
+    for j, bi in enumerate(plot_bins):
+        title = bin_labels[j]
+        raw_traces = [
+            ('observation', idx[look_back:train_end], train_true[look_back:, bi], 'green', 'lines'),
+            ('observation', idx[train_end:val_end], val_true[:, bi], 'green', 'lines'),
+            ('observation', idx[val_end:test_end], test_true[:, bi], 'green', 'lines'),
+            ('training prediction', idx[look_back:train_end], train_pred[:, bi], 'blue', 'lines'),
+            ('validation prediction', idx[train_end:val_end], val_pred[:, bi], 'goldenrod', 'lines'),
+            ('test prediction', idx[val_end:test_end], test_pred[:, bi], 'magenta', 'lines'),
+            ('future prediction', idx[test_end:future_end], future_pred[:, bi], 'red', 'lines'),
+        ]
+        traces = []
+        for name, x, y, color, mode in raw_traces:
+            traces.append(
+                make_trace(
+                    name, x, y, mode=mode, color=color, showlegend=(j == 0),
+                    hovertemplate=(
+                        f'{title}<br>'
+                        'date=%{x|%Y-%m-%d}<br>'
+                        f'{name}=%{{y:.6g}}<extra></extra>'
+                    ),
+                )
+            )
+        panels.append({
+            'title': title,
+            'traces': traces,
+            'vlines': [idx[split] for split in [look_back, train_end, val_end, test_end]],
+        })
+    write_plotly_panels(
+        output_path, 'Electron Flux Prediction', panels,
+        columns=2, yaxis_title='Electron Flux',
+    )
+
+
+def write_error_html(output_path, idx, plot_bins, bin_labels, train_error, val_error, test_error):
+    from tool_plotlyhtml import make_trace, write_plotly_panels
+
+    panels = []
+    for j, bi in enumerate(plot_bins):
+        title = bin_labels[j]
+        raw_traces = [
+            ('training error', idx[look_back:train_end], train_error[:, bi], 'blue'),
+            ('validation error', idx[train_end:val_end], val_error[:, bi], 'goldenrod'),
+            ('test error', idx[val_end:test_end], test_error[:, bi], 'magenta'),
+        ]
+        traces = []
+        for name, x, y, color in raw_traces:
+            traces.append(
+                make_trace(
+                    name, x, y, mode='lines', color=color, showlegend=(j == 0),
+                    hovertemplate=(
+                        f'{title}<br>'
+                        'date=%{x|%Y-%m-%d}<br>'
+                        f'{name}=%{{y:.6g}}<extra></extra>'
+                    ),
+                )
+            )
+        panels.append({
+            'title': title,
+            'traces': traces,
+            'vlines': [idx[split] for split in [train_end, val_end]],
+            'hlines': [0],
+        })
+    write_plotly_panels(
+        output_path, 'Electron Flux Relative Error', panels,
+        columns=2, yaxis_title='Relative Error',
+    )
+
 # =====================================================
 # 7. 模型列表 — 填入最佳模型
 # =====================================================
@@ -254,6 +329,12 @@ for m in model_list:
     fig.supxlabel('Year', y=0.03, fontsize=14)
     plt.savefig('./Figure/lstmdraw/electron_prediction_' + m + '.pdf', bbox_inches='tight')
     plt.close()
+    write_prediction_html(
+        './Figure/lstmdraw/electron_prediction_' + m + '.html',
+        idx, plot_bins, bin_labels,
+        train_true_origin, val_true_origin, test_true_origin,
+        train_pred_origin, val_pred_origin, test_pred_origin, future_pred_origin,
+    )
 
     # —— 相对误差, 2×2 ——
     fig, axs = plt.subplots(2, 2, figsize=(18, 10), sharex=True)
@@ -274,5 +355,9 @@ for m in model_list:
     fig.supxlabel('Year', y=0.03, fontsize=14)
     plt.savefig('./Figure/lstmdraw/electron_error_' + m + '.pdf', bbox_inches='tight')
     plt.close()
+    write_error_html(
+        './Figure/lstmdraw/electron_error_' + m + '.html',
+        idx, plot_bins, bin_labels, train_error, val_error, test_error,
+    )
 
 print("Done ✅")

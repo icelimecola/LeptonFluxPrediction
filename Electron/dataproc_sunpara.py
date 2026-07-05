@@ -203,6 +203,41 @@ def save(name, array):
     np.save(OUT_DIR / name, array)
 
 
+def write_sunpara_html(output_path, obs_dates, pred_dates, sun5_daily, sun5_pred):
+    from tool_plotlyhtml import make_trace, write_plotly_panels
+
+    labels = ['B (nT)', 'V_sw (km/s)', 'alpha (degree)', 'A', 'SSN']
+    panels = []
+    for i, label in enumerate(labels):
+        panels.append({
+            'title': label,
+            'traces': [
+                make_trace(
+                    'Observation', obs_dates, sun5_daily[:, i],
+                    mode='lines', color='green', showlegend=(i == 0),
+                    hovertemplate=(
+                        f'{label}<br>'
+                        'date=%{x|%Y-%m-%d}<br>'
+                        'Observation=%{y:.6g}<extra></extra>'
+                    ),
+                ),
+                make_trace(
+                    'Theory Prediction', pred_dates, sun5_pred[:, i],
+                    mode='lines', color='red', dash='dash', showlegend=(i == 0),
+                    hovertemplate=(
+                        f'{label}<br>'
+                        'date=%{x|%Y-%m-%d}<br>'
+                        'Theory Prediction=%{y:.6g}<extra></extra>'
+                    ),
+                ),
+            ],
+        })
+    write_plotly_panels(
+        output_path, 'Daily Solar Activity', panels,
+        columns=1, yaxis_title='Value', height=260,
+    )
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -281,6 +316,7 @@ def main():
     print('sun5 observation:', sun5_daily.shape)
     print('sun5 forecast   :', sun5_pred.shape)
     print('sun5 all        :', sun5_all.shape)
+    write_sunpara_html(FIG_DIR / 'sun5_latest_24.html', obs_dates, pred_dates, sun5_daily, sun5_pred)
 
     # =====================================================
     # 12. 可选的检查图

@@ -87,6 +87,7 @@ def make_window(center_date, idx, days=13):
 def draw_forbush(center_date, root_file, outdir, targets):
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
+    from tool_plotlyhtml import make_trace, write_plotly_panels
 
     idx, flux_2d, err_2d, energy_edges = read_flux_from_root(root_file)
     center, mask = make_window(center_date, idx, days=13)
@@ -135,16 +136,17 @@ def draw_forbush(center_date, root_file, outdir, targets):
         ax.set_ylabel("Flux")
         ax.grid(True, color="0.9", lw=0.6)
 
-    # x-axis 只在底部两个 panel 显示 daily tick，避免上排太挤。
+    # x-axis 只在底部两个 panel 显示 daily tick，并保留年份。
     for ax in axs[-1, :]:
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%y-%m-%d"))
         ax.tick_params(axis="x", rotation=45)
 
     # PDF 输出统一放在 Figure/check_fd，方便和其他 Figure 分类保存。
     outdir.mkdir(parents=True, exist_ok=True)
     date_tag = center.strftime("%Y%m%d")
     pdf_file = outdir / f"electron_forbush_decrease_{date_tag}.pdf"
+    html_file = outdir / f"electron_forbush_decrease_{date_tag}.html"
 
     plt.subplots_adjust(left=0.08, right=0.97, top=0.93, bottom=0.10, wspace=0.08, hspace=0.12)
     fig.suptitle(f"Electron Flux around {center.strftime('%Y-%m-%d')} (13 days)", fontsize=15)
@@ -153,10 +155,42 @@ def draw_forbush(center_date, root_file, outdir, targets):
     plt.savefig(pdf_file, bbox_inches="tight")
     plt.close()
 
+    panels = []
+    for j, bi in enumerate(plot_bins):
+        title = "%.2f GeV  [%.2f-%.2f] GeV" % (energy_centers[bi], energy_edges[bi], energy_edges[bi + 1])
+        y = flux_2d[mask, bi]
+        yerr = err_2d[mask, bi]
+        panels.append({
+            "title": title,
+            "traces": [
+                make_trace(
+                    "flux", x, y, mode="lines+markers", color="#1f77b4",
+                    width=0.9, marker_size=5,
+                    error_y=yerr, customdata=yerr,
+                    hovertemplate=(
+                        f"{title}<br>"
+                        "date=%{x|%Y-%m-%d}<br>"
+                        "flux=%{y:.6g}<br>"
+                        "error=%{customdata:.6g}<extra></extra>"
+                    ),
+                    showlegend=(j == 0),
+                )
+            ],
+            "vlines": [center],
+        })
+    write_plotly_panels(
+        html_file,
+        f"Electron Flux around {center.strftime('%Y-%m-%d')} (13 days)",
+        panels,
+        columns=2,
+        yaxis_title="Electron Flux [m^-2 s^-1 sr^-1 (GeV/n)^-1]",
+    )
+
     print("center date =", center.strftime("%Y-%m-%d"))
     print("window      =", x[0].strftime("%Y-%m-%d"), "~", x[-1].strftime("%Y-%m-%d"))
     print("root file   =", root_file)
     print("saved       =", pdf_file)
+    print("saved       =", html_file)
 
 
 # =====================================================
