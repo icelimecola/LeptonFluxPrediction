@@ -5,6 +5,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from pathlib import Path
+import re
 
 
 import os
@@ -12,9 +13,60 @@ os.makedirs('./Data/lstmdraw', exist_ok=True)
 os.makedirs('./Figure/lstmdraw', exist_ok=True)
 
 # =====================================================
+# 0. 模型选择与 split 识别
+# =====================================================
+model_list = [
+    # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0.6train_0.2val_0217-0.00534.keras',
+]
+
+model_dir = Path('./Data/model')
+best_model_file = model_dir / 'best_model.txt'
+
+
+def load_energy_edges():
+    candidates = [
+        Path('Data/flux/electron_energy_edges.npy'),
+        Path('../step1/Data/flux/electron_energy_edges.npy'),
+    ]
+    for path in candidates:
+        if path.exists():
+            print('electron energy edges path : ', path)
+            return np.load(path)
+    raise FileNotFoundError('No electron_energy_edges.npy found in step2/Data/flux or step1/Data/flux')
+
+if not model_list and best_model_file.exists():
+    best_model = best_model_file.read_text(encoding='utf-8').strip()
+    if best_model:
+        model_list = [best_model]
+
+if not model_list:
+    raise FileNotFoundError(
+        'No model selected. Fill model_list in lstm_draw.py or run '
+        'lstm_bestmodel.py to create Data/model/best_model.txt'
+    )
+
+
+MODEL_SPLIT_RE = re.compile(
+    r'_(?P<train_num>[-+0-9.eE]+)train_(?P<val_num>[-+0-9.eE]+)val_\d+-[-+0-9.eE]+\.keras$'
+)
+
+
+def parse_model_split(model_name):
+    match = MODEL_SPLIT_RE.search(model_name)
+    if match is None:
+        return 0.6, 0.2
+    return float(match.group('train_num')), float(match.group('val_num'))
+
+
+model_splits = {parse_model_split(m) for m in model_list}
+if len(model_splits) != 1:
+    raise ValueError('All models in one draw run should use the same train/val split.')
+train_num, val_num = next(iter(model_splits))
+
+# =====================================================
 # 1. 载入太阳和流强数据
 # =====================================================
-sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
+sun_daily      = np.load('../../sun_processed/latest/sun5_daily_all_latest.npy')
 electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
 
 print('sun daily all latest : ', sun_daily.shape)
@@ -34,9 +86,8 @@ bins = electron_daily.shape[1]
 
 look_back  = 365
 n_features = bins + 5
-train_num  = 0.6
-val_num    = 0.2
 print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
+print('train_num =', train_num, 'val_num =', val_num)
 
 # 只组合观测数据
 Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily], axis=1)
@@ -45,8 +96,8 @@ print('Series = ', Series.shape)
 # =====================================================
 # 2. 划分训练、验证和测试集
 # =====================================================
-train_end = round(number * train_num)
-val_end   = round(number * (train_num + val_num))
+train_end = int(number * train_num)
+val_end   = int(number * (train_num + val_num))
 test_end  = number
 future_end = sun_daily.shape[0] - sun_offset
 print('train_end, val_end, test_end, future_end:', train_end, val_end, test_end, future_end)
@@ -191,31 +242,10 @@ def write_error_html(output_path, idx, plot_bins, bin_labels, train_error, val_e
         columns=2, yaxis_title='Relative Error',
     )
 
-# =====================================================
-# 7. 模型列表 — 填入最佳模型
-# =====================================================
-model_list = [
-    # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
-]
-
-model_dir = Path('./Data/model')
-best_model_file = model_dir / 'best_model.txt'
-
-if not model_list and best_model_file.exists():
-    best_model = best_model_file.read_text(encoding='utf-8').strip()
-    if best_model:
-        model_list = [best_model]
-
-if not model_list:
-    raise FileNotFoundError(
-        'No model selected. Fill model_list in lstm_draw.py or run '
-        'lstm_bestmodel.py to create Data/model/best_model.txt'
-    )
-
 from tensorflow.keras.models import load_model
 
 # =====================================================
-# 8. 逐模型预测 & 评估
+# 7. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
     model = load_model(str(model_dir / m), compile=False)
@@ -276,7 +306,7 @@ for m in model_list:
     # 9. 画图 — 4 个代表能档: ~1, 2, 5, 10 GeV, 2×2 布局
     # =====================================================
     # 加载真实能量边界
-    energy_edges = np.load('Data/flux/electron_energy_edges.npy')  # (42,) for 41 bins
+    energy_edges = load_energy_edges()  # (42,) for 41 bins
     energy_centers = 0.5 * (energy_edges[:-1] + energy_edges[1:])
 
     # 选择最接近 1, 2, 5, 10 GeV 的 bin

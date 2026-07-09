@@ -41,13 +41,17 @@ dropout   = config['dropout']
 
 
 # 载入太阳和流强数据
-sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
-electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
-electron_error_daily = np.load('Data/flux/electron_flux_abs_error_allbin.npy')
+sun_daily      = np.load('../../sun_processed/latest/sun5_daily_all_latest.npy')
+flux_path = config.get('flux_path', 'Data/flux/electron_flux_allbin.npy')
+error_path = config.get('error_path', 'Data/flux/electron_flux_abs_error_allbin.npy')
+electron_daily = np.load(flux_path)
+electron_error_daily = np.load(error_path)
 
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
 print('electron error daily : ',  electron_error_daily.shape)
+print('electron flux path : ', flux_path)
+print('electron error path : ', error_path)
 
 # 电子前补 365 天零 → 让 sun 参数更早进入历史窗口
 pad_days  = 365
@@ -144,6 +148,7 @@ batch_size    = config['batch_size']
 epoch_begin= config['epoch_begin']
 epochs= config['epochs']
 epoch_end=epoch_begin+epochs
+split_tag = str(train_num)+'train_'+str(val_num)+'val_'
 
 model = Sequential([
     Input(shape=(look_back, 5+2*bins), dtype='float32'),
@@ -184,6 +189,7 @@ checkpoint = ModelCheckpoint('./Data/modelw/'
         +str(l2)+'l2_'
         +str(dropout)+'dropout_'
         +str(batch_size)+'batchSize_'
+        +split_tag
         +'{epoch:04d}-{val_loss:.5f}'
         +'.keras',
         monitor='val_loss',
@@ -261,5 +267,6 @@ plt.savefig('./Figure/lstmtrainw/loss_errWeighted_'
         +str(dropout)+'dropout_'
         +str(learning_rate)+'learningRate_'
         +str(batch_size)+'batchSize'
+        +'_'+split_tag[:-1]
         +'.pdf', bbox_inches='tight')
 plt.close()

@@ -67,7 +67,7 @@ def fill_gaps_with_neighbor_sum(series):
 # =====================================================
 # 1. 读取 ROOT 文件
 # =====================================================
-f = uproot.open("../rawdata/flux/eleflux.root")
+f = uproot.open("../../rawdata/flux/eleflux.root")
 h2 = f["hflux_2d;1"]
 
 flux_2d = h2.values()   # (6000, 42)

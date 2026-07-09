@@ -18,6 +18,7 @@ MODEL_RE = re.compile(
     r'(?P<l2>[-+0-9.eE]+)l2_'
     r'(?P<dropout>[-+0-9.eE]+)dropout_'
     r'(?P<batch_size>\d+)batchSize_'
+    r'(?:(?P<train_num>[-+0-9.eE]+)train_(?P<val_num>[-+0-9.eE]+)val_)?'
     r'(?P<epoch>\d+)-(?P<val_loss>[-+0-9.eE]+)\.keras$'
 )
 
@@ -36,6 +37,8 @@ def parse_model(path):
     row['l2'] = float(row['l2'])
     row['dropout'] = float(row['dropout'])
     row['batch_size'] = int(row['batch_size'])
+    row['train_num'] = 0.6 if row['train_num'] is None else float(row['train_num'])
+    row['val_num'] = 0.2 if row['val_num'] is None else float(row['val_num'])
     row['epoch'] = int(row['epoch'])
     row['val_loss'] = float(row['val_loss'])
     return row
@@ -59,6 +62,7 @@ def main():
     fields = [
         'model', 'val_loss', 'epoch', 'epoch_begin', 'epoch_end',
         'learning_rate', 'neurons', 'l2', 'dropout', 'batch_size',
+        'train_num', 'val_num',
     ]
     with SUMMARY_FILE.open('w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fields)

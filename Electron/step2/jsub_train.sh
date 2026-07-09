@@ -2,7 +2,7 @@
 #JSUB -q gpu
 #JSUB -e JSUB/error/error.%J
 #JSUB -o JSUB/output/output.%J
-#JSUB -J elec_lstm_w
+#JSUB -J elec_lstm
 #JSUB -gpgpu 1
 #JSUB -n 1
 
@@ -12,10 +12,10 @@ export LD_LIBRARY_PATH=/public/soft/cuda-12.2/targets/x86_64-linux/lib:$LD_LIBRA
 export XLA_FLAGS=--xla_gpu_cuda_data_dir=/public/soft/cuda-12.2
 module load cuda-12.2
 
-cd /public/home/wxu.ams/LeptonFluxPrediction/Electron
+cd /public/home/wxu.ams/LeptonFluxPrediction/Electron/step2
 
-mkdir -p Data/modelw Figure/lstmtrainw
+mkdir -p Data/model Figure/lstmtrain
 
-~/miniconda3/envs/prediction/bin/python lstm_train_w.py --config Data/hyperpara/paras_NUM.yaml
+~/miniconda3/envs/prediction/bin/python lstm_train.py --config Data/hyperpara/paras_NUM.yaml
 
 rm .hostfile*

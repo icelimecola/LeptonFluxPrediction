@@ -210,9 +210,9 @@ def main():
     parser.add_argument("date", help="Center date, e.g. 2017-09-08")
     parser.add_argument(
         "--root-file",
-        default=here.parent / "rawdata" / "flux" / "eleflux.root",
+        default=here.parent.parent / "rawdata" / "flux" / "eleflux.root",
         type=Path,
-        help="Input ROOT file. Default: ../rawdata/flux/eleflux.root",
+        help="Input ROOT file. Default: ../../rawdata/flux/eleflux.root",
     )
     parser.add_argument(
         "--outdir",

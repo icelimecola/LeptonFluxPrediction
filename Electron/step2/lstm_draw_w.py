@@ -5,22 +5,79 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from pathlib import Path
+import re
 
 
 import os
 os.makedirs('./Data/lstmdraww', exist_ok=True)
 os.makedirs('./Figure/lstmdraww', exist_ok=True)
 
+FLUX_PATH = os.environ.get('ELECTRON_FLUX_PATH', 'Data/flux/electron_flux_allbin.npy')
+ERROR_PATH = os.environ.get('ELECTRON_ERROR_PATH', 'Data/flux/electron_flux_abs_error_allbin.npy')
+
+
+def load_energy_edges():
+    candidates = [
+        Path('Data/flux/electron_energy_edges.npy'),
+        Path('../step1/Data/flux/electron_energy_edges.npy'),
+    ]
+    for path in candidates:
+        if path.exists():
+            print('electron energy edges path : ', path)
+            return np.load(path)
+    raise FileNotFoundError('No electron_energy_edges.npy found in step2/Data/flux or step1/Data/flux')
+
+# =====================================================
+# 0. 模型选择与 split 识别
+# =====================================================
+model_list = [
+    # 'errWeighted_0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0.6train_0.2val_0553-0.00321.keras',
+]
+
+model_dir = Path('./Data/modelw')
+best_model_file = model_dir / 'best_model.txt'
+
+if not model_list and best_model_file.exists():
+    best_model = best_model_file.read_text(encoding='utf-8').strip()
+    if best_model:
+        model_list = [best_model]
+
+if not model_list:
+    raise FileNotFoundError(
+        'No weighted model selected. Fill model_list in lstm_draw_w.py or run '
+        'lstm_bestmodel_w.py to create Data/modelw/best_model.txt'
+    )
+
+
+MODEL_SPLIT_RE = re.compile(
+    r'_(?P<train_num>[-+0-9.eE]+)train_(?P<val_num>[-+0-9.eE]+)val_\d+-[-+0-9.eE]+\.keras$'
+)
+
+
+def parse_model_split(model_name):
+    match = MODEL_SPLIT_RE.search(model_name)
+    if match is None:
+        return 0.6, 0.2
+    return float(match.group('train_num')), float(match.group('val_num'))
+
+
+model_splits = {parse_model_split(m) for m in model_list}
+if len(model_splits) != 1:
+    raise ValueError('All models in one draw run should use the same train/val split.')
+train_num, val_num = next(iter(model_splits))
+
 # =====================================================
 # 1. 载入太阳和流强数据
 # =====================================================
-sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
-electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
-electron_error_daily = np.load('Data/flux/electron_flux_abs_error_allbin.npy')
+sun_daily      = np.load('../../sun_processed/latest/sun5_daily_all_latest.npy')
+electron_daily = np.load(FLUX_PATH)
+electron_error_daily = np.load(ERROR_PATH)
 
 print('sun daily all latest : ', sun_daily.shape)
 print('electron flux daily : ',  electron_daily.shape)
 print('electron error daily : ',  electron_error_daily.shape)
+print('electron flux path : ', FLUX_PATH)
+print('electron error path : ', ERROR_PATH)
 
 # 电子前补 365 天零
 pad_days  = 365
@@ -37,9 +94,8 @@ bins = electron_daily.shape[1]
 
 look_back  = 365
 n_features = 5 + 2*bins
-train_num  = 0.6
-val_num    = 0.2
 print('number = ', number, 'bins = ', bins, 'sun_offset =', sun_offset)
+print('train_num =', train_num, 'val_num =', val_num)
 
 # 只组合观测数据
 Series = np.concatenate([sun_daily[sun_offset:sun_offset+number], electron_daily, electron_error_daily], axis=1)
@@ -48,8 +104,8 @@ print('Series = ', Series.shape)
 # =====================================================
 # 2. 划分训练、验证和测试集
 # =====================================================
-train_end = round(number * train_num)
-val_end   = round(number * (train_num + val_num))
+train_end = int(number * train_num)
+val_end   = int(number * (train_num + val_num))
 test_end  = number
 future_end = sun_daily.shape[0] - sun_offset
 print('train_end, val_end, test_end, future_end:', train_end, val_end, test_end, future_end)
@@ -115,6 +171,20 @@ def make_sequence(X, y, look_back):
         X_seq.append(X[i - look_back:i, :])
         y_seq.append(y[i, :])
     return np.array(X_seq), np.array(y_seq)
+
+
+def safe_relative_error(pred, true):
+    pred = np.asarray(pred, dtype=float)
+    true = np.asarray(true, dtype=float)
+    out = np.full_like(pred, np.nan, dtype=float)
+    valid = np.isfinite(pred) & np.isfinite(true) & (true > 0)
+    out[valid] = pred[valid] / true[valid] - 1
+    return out
+
+
+def safe_mean_abs_relative_error(pred, true):
+    err = safe_relative_error(pred, true)
+    return np.nanmean(np.abs(err))
 
 X_train_seq, y_train_seq = make_sequence(X_train, y_train, look_back)
 X_val_seq,   y_val_seq   = make_sequence(X_val,   y_val,   look_back)
@@ -216,32 +286,10 @@ def write_error_html(output_path, idx, plot_bins, bin_labels, train_error, val_e
         columns=2, yaxis_title='Relative Error',
     )
 
-# =====================================================
-# 7. 模型列表 — 填入最佳模型
-# =====================================================
-model_list = [
-    # '0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0217-0.00534.keras',
-    # 'errWeighted_0-5000epoch_0.0001learningRate_64neurons_0.002l2_0.08dropout_64batchSize_0553-0.00321.keras',
-]
-
-model_dir = Path('./Data/modelw')
-best_model_file = model_dir / 'best_model.txt'
-
-if not model_list and best_model_file.exists():
-    best_model = best_model_file.read_text(encoding='utf-8').strip()
-    if best_model:
-        model_list = [best_model]
-
-if not model_list:
-    raise FileNotFoundError(
-        'No weighted model selected. Fill model_list in lstm_draw_w.py or run '
-        'lstm_bestmodel_w.py to create Data/modelw/best_model.txt'
-    )
-
 from tensorflow.keras.models import load_model
 
 # =====================================================
-# 8. 逐模型预测 & 评估
+# 7. 逐模型预测 & 评估
 # =====================================================
 for m in model_list:
     model = load_model(str(model_dir / m), compile=False)
@@ -255,26 +303,26 @@ for m in model_list:
     train_pred_mean   = model.predict(X_train_seq)
     train_pred_origin = scaler_flux.inverse_transform(train_pred_mean)
     train_true_origin = scaler_flux.inverse_transform(y_train[:, :])
-    train_rme = np.mean(np.abs(train_pred_origin - train_true_origin[look_back:]) / train_true_origin[look_back:])
+    train_rme = safe_mean_abs_relative_error(train_pred_origin, train_true_origin[look_back:])
 
     # --- 验证集预测 ---
     val_pred_mean   = model.predict(X_val_seq)
     val_pred_origin = scaler_flux.inverse_transform(val_pred_mean)
     val_true_origin = scaler_flux.inverse_transform(y_val[look_back:, :])
-    val_rme = np.mean(np.abs(val_pred_origin - val_true_origin) / val_true_origin)
+    val_rme = safe_mean_abs_relative_error(val_pred_origin, val_true_origin)
 
     # --- 测试集预测 ---
     test_pred_mean   = model.predict(X_test_seq)
     test_pred_origin = scaler_flux.inverse_transform(test_pred_mean)
     test_true_origin = scaler_flux.inverse_transform(y_test[look_back:, :])
-    test_rme = np.mean(np.abs(test_pred_origin - test_true_origin) / test_true_origin)
+    test_rme = safe_mean_abs_relative_error(test_pred_origin, test_true_origin)
 
     print('mean relative error : training', train_rme, ', validation', val_rme, ', test', test_rme)
 
     # --- 计算各段相对误差 ---
-    train_error = np.array(train_pred_origin) / np.array(train_true_origin[look_back:]) - 1
-    val_error   = np.array(val_pred_origin)   / np.array(val_true_origin) - 1
-    test_error  = np.array(test_pred_origin)  / np.array(test_true_origin) - 1
+    train_error = safe_relative_error(train_pred_origin, train_true_origin[look_back:])
+    val_error   = safe_relative_error(val_pred_origin, val_true_origin)
+    test_error  = safe_relative_error(test_pred_origin, test_true_origin)
     print('train error shape =', train_error.shape)
 
     np.save('./Data/lstmdraww/train_error_allbin_' + m + '.npy', train_error)
@@ -302,7 +350,7 @@ for m in model_list:
     # 9. 画图 — 4 个代表能档: ~1, 2, 5, 10 GeV, 2×2 布局
     # =====================================================
     # 加载真实能量边界
-    energy_edges = np.load('Data/flux/electron_energy_edges.npy')  # (42,) for 41 bins
+    energy_edges = load_energy_edges()  # (42,) for 41 bins
     energy_centers = 0.5 * (energy_edges[:-1] + energy_edges[1:])
 
     # 选择最接近 1, 2, 5, 10 GeV 的 bin

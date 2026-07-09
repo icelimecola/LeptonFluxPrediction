@@ -41,7 +41,7 @@ dropout   = config['dropout']
 
 
 # 载入太阳和流强数据
-sun_daily      = np.load('../sun_processed/latest/sun5_daily_all_latest.npy')
+sun_daily      = np.load('../../sun_processed/latest/sun5_daily_all_latest.npy')
 electron_daily = np.load('Data/flux/electron_flux_allbin.npy')
 
 print('sun daily all latest : ', sun_daily.shape)
@@ -131,6 +131,7 @@ batch_size    = config['batch_size']
 epoch_begin= config['epoch_begin']
 epochs= config['epochs']
 epoch_end=epoch_begin+epochs
+split_tag = str(train_num)+'train_'+str(val_num)+'val_'
 
 model = Sequential([
     Input(shape=(look_back, 5+bins), dtype='float32'),
@@ -160,6 +161,7 @@ checkpoint = ModelCheckpoint('./Data/model/'
         +str(l2)+'l2_'
         +str(dropout)+'dropout_'
         +str(batch_size)+'batchSize_'
+        +split_tag
         +'{epoch:04d}-{val_loss:.5f}'
         +'.keras',
         monitor='val_loss',
@@ -236,5 +238,6 @@ plt.savefig('./Figure/lstmtrain/loss_'
         +str(dropout)+'dropout_'
         +str(learning_rate)+'learningRate_'
         +str(batch_size)+'batchSize'
+        +'_'+split_tag[:-1]
         +'.pdf', bbox_inches='tight')
 plt.close()

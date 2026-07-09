@@ -13,8 +13,8 @@ import numpy as np
 # =====================================================
 # 太阳参数 rawdata 按更新时间分文件夹保存。
 # 当前使用 260701，也就是 2026-07-01 这一版下载/整理后的结果。
-RAWDATA_DIR = Path('../rawdata/sunpara/260701')
-OUT_DIR = Path('../sun_processed/latest')
+RAWDATA_DIR = Path('../../rawdata/sunpara/260701')
+OUT_DIR = Path('../../sun_processed/latest')
 FIG_DIR = Path('./Figure/sunpara')
 
 # 观测段输入：
@@ -27,9 +27,13 @@ TILT_FILE = RAWDATA_DIR / 'wso_tilt_27d.txt'
 POLAR_FILE = RAWDATA_DIR / 'wso_polar_10d.txt'
 SSN_FILE = RAWDATA_DIR / 'silso_SN_d_tot_V2.0.csv'
 
-# forecast 输入。这里仍然使用手工整理的月度预测表；
+# forecast 输入。
+#   para_solar_predict.txt       -> TILT, Vsw, BE 继续沿用旧月度预测表
+#   NASA/MSFC ssn smt + prd      -> SSN 改用 NASA 13-month smoothed + 50% forecast
 # 脚本只会根据最新观测结束日期，自动裁掉已经被观测覆盖的 forecast 日期。
 PREDICT_FILE = RAWDATA_DIR / 'para_solar_predict.txt'
+NASA_SSN_SMT_FILE = RAWDATA_DIR / 'msfc-jun2026ssn-smt.txt'
+NASA_SSN_PRD_FILE = RAWDATA_DIR / 'msfc-jun2026ssn-prd.txt'
 
 # 最终输出保持训练脚本使用的总时间范围不变。
 # 观测段/预测段的分界点由当前观测数据自动决定。
@@ -83,6 +87,15 @@ def parse_number_token(token):
     if match is None:
         return np.nan
     return float(match.group(0))
+
+
+def decimal_year_to_month(decimal_year):
+    """把 NASA forecast 文件里的 decimal year 转成该月 1 号。"""
+    year = int(decimal_year)
+    month = int(round((decimal_year - year) * 12)) + 1
+    if month < 1 or month > 12:
+        raise ValueError(f'invalid decimal year month: {decimal_year}')
+    return date(year, month, 1)
 
 
 # =====================================================
@@ -151,6 +164,51 @@ def load_ssn(path):
     return dates, data[:, 4]
 
 
+def load_nasa_ssn_smt(path):
+    """NASA/MSFC monthly SSN: 使用第 3 列 13-Month Smoothed。"""
+    dates = []
+    values = []
+    with path.open(encoding='utf-8', errors='replace') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3 or not re.match(r'\d{4}\.\d+', parts[0]):
+                continue
+            dates.append(decimal_year_to_month(float(parts[0])))
+            values.append(float(parts[2]))
+    return dates, np.array(values, dtype=float)
+
+
+def load_nasa_ssn_prd(path):
+    """NASA/MSFC monthly SSN forecast: 使用 sunspot number 的 50% percentile。"""
+    dates = []
+    values = []
+    with path.open(encoding='utf-8', errors='replace') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 5 or not re.match(r'\d{4}\.\d+', parts[0]):
+                continue
+            dates.append(decimal_year_to_month(float(parts[0])))
+            values.append(float(parts[3]))
+    return dates, np.array(values, dtype=float)
+
+
+def load_nasa_ssn_forecast():
+    """拼接 NASA smoothed observation 和 forecast，形成连续的月度 SSN 序列。"""
+    smt_dates, smt_values = load_nasa_ssn_smt(NASA_SSN_SMT_FILE)
+    prd_dates, prd_values = load_nasa_ssn_prd(NASA_SSN_PRD_FILE)
+    first_prd_date = prd_dates[0]
+
+    dates = []
+    values = []
+    for d, v in zip(smt_dates, smt_values):
+        if d < first_prd_date:
+            dates.append(d)
+            values.append(v)
+    dates.extend(prd_dates)
+    values.extend(prd_values)
+    return dates, np.array(values, dtype=float)
+
+
 # =====================================================
 # 3. 太阳磁极性 SP 的 sigmoid 平滑
 # =====================================================
@@ -169,7 +227,10 @@ def build_sp_sigmoid(n_days):
 # =====================================================
 # 4. forecast 预测段
 # =====================================================
-# 月度预测表从 2025-01 开始。
+# 旧月度预测表从 2025-01 开始，用于 TILT/Vsw/BE。
+# SSN 改用 NASA/MSFC 月度序列：
+#   smt: 过去的 13-Month Smoothed
+#   prd: 未来预测的 50% percentile
 # 当观测结束日期 obs_end 确定后，所有已经被观测覆盖的 forecast 日期都会被丢掉。
 def build_forecast(obs_end):
     sun = np.genfromtxt(PREDICT_FILE, skip_header=1)
@@ -177,6 +238,7 @@ def build_forecast(obs_end):
     years = sun[:, 0].astype(int)
     months = sun[:, 1].astype(int)
     month_dates = [date(y, m, 1) for y, m in zip(years, months)]
+    nasa_ssn_dates, nasa_ssn_values = load_nasa_ssn_forecast()
 
     forecast_dates = date_range(PREDICT_TABLE_START, FINAL_END)
     keep_dates = [d for d in forecast_dates if d > obs_end]
@@ -185,7 +247,11 @@ def build_forecast(obs_end):
         daily_dates, daily_values = daily_interp(month_dates, values)
         return select_by_date(daily_dates, daily_values, keep_dates, 'forecast')
 
-    ssn_daily = interp_column(sun[:, 2])
+    def interp_nasa_ssn():
+        daily_dates, daily_values = daily_interp(nasa_ssn_dates, nasa_ssn_values)
+        return select_by_date(daily_dates, daily_values, keep_dates, 'NASA SSN forecast')
+
+    ssn_daily = interp_nasa_ssn()
     tilt_daily = interp_column(sun[:, 4])
     vsw_daily = interp_column(sun[:, 5])
     be_daily = interp_column(sun[:, 6])
