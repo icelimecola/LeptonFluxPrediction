@@ -19,7 +19,7 @@ fi
 
 for config_path in "${configs[@]}"; do
   echo "Training sun imputer with ${config_path}"
-  "$PYTHON_BIN" train_sun_imputer.py --config "$config_path"
+  "$PYTHON_BIN" lstm_train_sunpara.py --config "$config_path"
 done
 
-"$PYTHON_BIN" best_sun_imputer.py
+"$PYTHON_BIN" lstm_bestmodel_sunpara.py

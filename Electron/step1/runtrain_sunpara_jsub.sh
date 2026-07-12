@@ -27,4 +27,4 @@ for config_path in "${configs[@]}"; do
 done
 
 echo "After all jobs finish, run:"
-echo "  python best_sun_imputer.py"
+echo "  python lstm_bestmodel_sunpara.py"

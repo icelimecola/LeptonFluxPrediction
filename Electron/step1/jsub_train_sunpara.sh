@@ -16,6 +16,6 @@ cd /public/home/wxu.ams/LeptonFluxPrediction/Electron/step1
 
 mkdir -p Data/model Figure/lstmtrain Figure/lstmdraw Figure/flux
 
-~/miniconda3/envs/prediction/bin/python train_sun_imputer.py --config Data/hyperpara/paras_NUM.yaml
+~/miniconda3/envs/prediction/bin/python lstm_train_sunpara.py --config Data/hyperpara/paras_NUM.yaml
 
 rm .hostfile*

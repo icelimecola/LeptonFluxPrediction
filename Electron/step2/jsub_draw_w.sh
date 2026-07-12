@@ -14,6 +14,13 @@ module load cuda-12.2
 
 cd /public/home/wxu.ams/LeptonFluxPrediction/Electron/step2
 
+FLUX_SOURCE_DEFAULT="baseline"
+FLUX_SOURCE="${FLUX_SOURCE:-$FLUX_SOURCE_DEFAULT}"
+if [ "$FLUX_SOURCE" = "imputed" ]; then
+  export ELECTRON_FLUX_PATH=../step1/Data/flux/electron_flux_sun_imputed.npy
+  export ELECTRON_ERROR_PATH=../step1/Data/flux/electron_err_sun_imputed.npy
+fi
+
 ~/miniconda3/envs/prediction/bin/python lstm_draw_w.py
 
 rm .hostfile*

@@ -55,3 +55,9 @@ python lstm_draw_w.py
 
 If these environment variables are omitted, drawing uses the baseline files in
 `step2/Data/flux/`.
+
+For cluster drawing through the wrapper, use:
+
+```bash
+FLUX_SOURCE=imputed bash rundraww.sh
+```
