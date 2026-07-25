@@ -22,6 +22,8 @@ from common import (
     load_sun_daily,
     minmax_inverse,
     minmax_transform,
+    relative_rmse_by_bin,
+    trainerr_path,
 )
 
 
@@ -34,7 +36,7 @@ def parse_args():
     parser.add_argument("--flux", type=str, default=str(imputation_path("electron_flux_observed_nan.npy")))
     parser.add_argument("--mask", type=str, default=str(imputation_path("electron_observed_mask.npy")))
     parser.add_argument("--err", type=str, default=str(imputation_path("electron_err_observed_nan.npy")))
-    parser.add_argument("--rrmse", type=str, default=str(imputation_path("sun_imputer_validation_relative_rmse_per_bin.npy")))
+    parser.add_argument("--rrmse", type=str, default="", help="Optional validation relative-RMSE file. Defaults to recomputing from validation observations.")
     parser.add_argument("--default-rrmse", type=float, default=0.3)
     parser.add_argument("--no-plots", action="store_true", help="Skip final flux overview plots.")
     parser.add_argument("--no-eval-plots", action="store_true", help="Skip lstmdraw-style first-stage evaluation plots.")
@@ -249,12 +251,10 @@ def write_flux_plots(dates, flux, err, mask_obs):
     print("Saved plots to:", out_dir)
 
 
-def estimate_imputed_err(err_obs, mask_obs, pred_flux, rrmse_path, default_rrmse):
-    rrmse_path = Path(rrmse_path)
-    if rrmse_path.exists():
-        rrmse = np.load(rrmse_path)
-    else:
-        rrmse = np.full(err_obs.shape[1], default_rrmse, dtype=float)
+def estimate_imputed_err(err_obs, mask_obs, pred_flux, rrmse, default_rrmse):
+    rrmse = np.asarray(rrmse, dtype=float)
+    if rrmse.ndim == 0:
+        rrmse = np.full(err_obs.shape[1], float(rrmse), dtype=float)
     rrmse = np.where(np.isfinite(rrmse) & (rrmse > 0), rrmse, default_rrmse)
 
     neighbor_err = interpolate_nan_by_bin(err_obs)
@@ -264,6 +264,20 @@ def estimate_imputed_err(err_obs, mask_obs, pred_flux, rrmse_path, default_rrmse
     err_imputed[mask_obs] = err_obs[mask_obs]
     err_imputed = np.where(np.isfinite(err_imputed) & (err_imputed >= 0), err_imputed, neighbor_err)
     return neighbor_err, err_imputed
+
+
+def load_rrmse_override(path, default_rrmse, n_bins):
+    if not path:
+        return None
+    loaded = np.load(path)
+    if isinstance(loaded, np.lib.npyio.NpzFile):
+        rrmse = loaded["validation"]
+    else:
+        rrmse = loaded
+    rrmse = np.asarray(rrmse, dtype=float)
+    if rrmse.shape != (n_bins,):
+        raise ValueError(f"RMSE override shape {rrmse.shape} does not match bins {(n_bins,)}")
+    return np.where(np.isfinite(rrmse) & (rrmse > 0), rrmse, default_rrmse)
 
 
 def model_tag(model_name):
@@ -571,19 +585,26 @@ def main():
     flux_obs = np.load(args.flux)
     err_obs = np.load(args.err)
     mask_obs = np.load(args.mask).astype(bool)
-    scalers = np.load(imputation_path("sun_imputer_scalers.npz"))
-    look_back = int(scalers["look_back"])
-    x_min, x_max = scalers["x_min"], scalers["x_max"]
-    y_min, y_max = scalers["y_min"], scalers["y_max"]
+    training_meta = np.load(trainerr_path("sun_imputer_scalers.npz"))
+    look_back = int(training_meta["look_back"])
+    train_num = float(training_meta["train_num"])
+    val_num = float(training_meta["val_num"])
+    x_min, x_max = training_meta["x_min"], training_meta["x_max"]
+    y_min, y_max = training_meta["y_min"], training_meta["y_max"]
 
     model_path = args.model if args.model else str(find_best_model("sunImputer_"))
-    model = load_model(model_path, custom_objects={"masked_huber": masked_huber})
-
     bins = flux_obs.shape[1]
     flux_padded = np.concatenate([np.full((PAD_DAYS, bins), np.nan), flux_obs], axis=0)
+    mask_padded = np.concatenate([np.zeros((PAD_DAYS, bins), dtype=bool), mask_obs], axis=0)
     sun_daily = load_sun_daily()
-    X_all = sun_daily[SUN_OFFSET:SUN_OFFSET + len(flux_padded), 0:5]
-    X_all = minmax_transform(X_all, x_min, x_max)
+    X_all_raw = sun_daily[SUN_OFFSET:SUN_OFFSET + len(flux_padded), 0:5]
+    number = len(flux_padded)
+    train_end = int(number * train_num)
+    val_end = int(number * (train_num + val_num))
+
+    model = load_model(model_path, custom_objects={"masked_huber": masked_huber})
+
+    X_all = minmax_transform(X_all_raw, x_min, x_max)
     X_seq = make_sequence(X_all, look_back)
 
     pred_scaled = model.predict(X_seq, verbose=1)
@@ -603,11 +624,27 @@ def main():
     flux_imputed = flux_obs.copy()
     flux_imputed[~mask_obs] = pred_flux[~mask_obs]
 
+    if args.rrmse:
+        validation_rrmse = load_rrmse_override(args.rrmse, args.default_rrmse, bins)
+    else:
+        val_target_start = max(look_back, train_end)
+        val_target_stop = val_end
+        val_actual_start = val_target_start - PAD_DAYS
+        val_actual_stop = val_target_stop - PAD_DAYS
+        val_actual_start = max(0, val_actual_start)
+        val_actual_stop = min(len(flux_obs), val_actual_stop)
+        validation_rrmse = relative_rmse_by_bin(
+            pred_flux[val_actual_start:val_actual_stop],
+            flux_obs[val_actual_start:val_actual_stop],
+            mask_obs[val_actual_start:val_actual_stop],
+            fallback=args.default_rrmse,
+        )
+
     neighbor_err, err_imputed = estimate_imputed_err(
         err_obs,
         mask_obs,
         pred_flux,
-        args.rrmse,
+        validation_rrmse,
         args.default_rrmse,
     )
 
@@ -617,6 +654,8 @@ def main():
     np.save(imputation_path("electron_err_sun_imputed.npy"), err_imputed)
 
     print("Loaded model:", model_path)
+    print("Loaded look_back:", look_back, "train_num:", train_num, "val_num:", val_num)
+    print("Recomputed validation relative RMSE from current observations")
     print("Saved all sun-only predictions:", imputation_path("electron_flux_sun_pred_allbin.npy"))
     print("Saved imputed flux:", imputation_path("electron_flux_sun_imputed.npy"))
     print("Saved neighbor/interpolated err:", imputation_path("electron_err_neighbor_interp.npy"))

@@ -14,6 +14,13 @@ The first-stage flux/data products are written to `Data/flux/`:
 - `electron_flux_sun_imputed.npy`: observed flux preserved, missing flux filled with sun-only predictions
 - `electron_err_sun_imputed.npy`: observed error preserved, missing error estimated conservatively
 
+Training diagnostics are written to `Data/trainerr/`:
+
+- `sun_imputer_scalers.npz`: latest training run's normalization parameters, for diagnostics/compatibility
+- `sun_imputer_train_relative_rmse_per_bin.npy`: per-bin relative RMSE on training observations
+- `sun_imputer_validation_relative_rmse_per_bin.npy`: per-bin relative RMSE on validation observations
+- `sun_imputer_test_relative_rmse_per_bin.npy`: per-bin relative RMSE on test observations
+
 The final draw step also writes overview plots to `Figure/flux/`:
 
 - `electron_flux_sun_imputed_overview.pdf/html`: final continuous flux with imputed points highlighted
@@ -47,10 +54,10 @@ For hyperparameter scans, use one of these wrappers instead of calling a single
 
 ```bash
 # Local/interactive serial scan over Data/hyperpara/paras_*.yaml
-bash runtrain_sun_imputer.sh
+bash runtrain_sunpara.sh
 
 # Cluster submission, matching the existing jsub style
-bash runtrain_sun_imputer_jsub.sh
+bash runtrain_sunpara_jsub.sh
 ```
 
 The local wrapper runs `lstm_bestmodel_sunpara.py` automatically after all

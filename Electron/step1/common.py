@@ -19,6 +19,7 @@ def ensure_dirs():
     (STEP1_DIR / "Data" / "flux").mkdir(parents=True, exist_ok=True)
     (STEP1_DIR / "Data" / "model").mkdir(parents=True, exist_ok=True)
     (STEP1_DIR / "Data" / "lstmdraw").mkdir(parents=True, exist_ok=True)
+    (STEP1_DIR / "Data" / "trainerr").mkdir(parents=True, exist_ok=True)
     (STEP1_DIR / "Figure" / "flux").mkdir(parents=True, exist_ok=True)
     (STEP1_DIR / "Figure" / "lstmtrain").mkdir(parents=True, exist_ok=True)
     (STEP1_DIR / "Figure" / "lstmdraw").mkdir(parents=True, exist_ok=True)
@@ -30,6 +31,10 @@ def imputation_path(name):
 
 def draw_data_path(name):
     return STEP1_DIR / "Data" / "lstmdraw" / name
+
+
+def trainerr_path(name):
+    return STEP1_DIR / "Data" / "trainerr" / name
 
 
 def model_dir():

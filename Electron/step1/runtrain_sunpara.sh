@@ -7,7 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 cd "$SCRIPT_DIR"
 
-mkdir -p Data/model Data/hyperpara Data/lstmdraw Figure/lstmtrain Figure/lstmdraw Figure/flux
+mkdir -p Data/model Data/hyperpara Data/lstmdraw Data/trainerr Figure/lstmtrain Figure/lstmdraw Figure/flux
 
 shopt -s nullglob
 configs=(Data/hyperpara/paras_*.yaml)

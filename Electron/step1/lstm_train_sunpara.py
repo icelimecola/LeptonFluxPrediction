@@ -19,6 +19,7 @@ from common import (
     nanminmax_fit,
     relative_rmse_by_bin,
     train_figure_dir,
+    trainerr_path,
     load_sun_daily,
 )
 
@@ -130,17 +131,6 @@ def main():
     y_train_packed = np.concatenate([y_train_seq, m_train_seq], axis=1)
     y_val_packed = np.concatenate([y_val_seq, m_val_seq], axis=1)
 
-    np.savez(
-        imputation_path("sun_imputer_scalers.npz"),
-        x_min=x_min,
-        x_max=x_max,
-        y_min=y_min,
-        y_max=y_max,
-        look_back=look_back,
-        train_num=train_num,
-        val_num=val_num,
-    )
-
     model = Sequential([
         Input(shape=(look_back, 5), dtype="float32"),
         LSTM(units=neurons, dropout=dropout, kernel_regularizer=L1L2(l1=0, l2=l2), name="LSTM"),
@@ -183,6 +173,17 @@ def main():
     best_path = find_best_model("sunImputer_", prefer_best_file=False)
     (model_dir() / "best_model.txt").write_text(best_path.name + "\n", encoding="utf-8")
 
+    scaler_payload = {
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
+        "look_back": look_back,
+        "train_num": train_num,
+        "val_num": val_num,
+    }
+    np.savez(trainerr_path("sun_imputer_scalers.npz"), **scaler_payload)
+
     best_model = load_model(best_path, custom_objects={"masked_huber": masked_huber_factory(bins)})
     val_pred_scaled = best_model.predict(X_val_seq, verbose=0)
     train_pred_scaled = best_model.predict(X_train_seq, verbose=0)
@@ -198,9 +199,9 @@ def main():
     val_rrmse = relative_rmse_by_bin(val_pred, val_true, m_val_seq)
     train_rrmse = relative_rmse_by_bin(train_pred, train_true, m_train_seq)
     test_rrmse = relative_rmse_by_bin(test_pred, test_true, m_test_seq)
-    np.save(imputation_path("sun_imputer_validation_relative_rmse_per_bin.npy"), val_rrmse)
-    np.save(imputation_path("sun_imputer_train_relative_rmse_per_bin.npy"), train_rrmse)
-    np.save(imputation_path("sun_imputer_test_relative_rmse_per_bin.npy"), test_rrmse)
+    np.save(trainerr_path("sun_imputer_validation_relative_rmse_per_bin.npy"), val_rrmse)
+    np.save(trainerr_path("sun_imputer_train_relative_rmse_per_bin.npy"), train_rrmse)
+    np.save(trainerr_path("sun_imputer_test_relative_rmse_per_bin.npy"), test_rrmse)
 
     import matplotlib.pyplot as plt
 
@@ -215,8 +216,8 @@ def main():
     plt.close()
 
     print("Best sun imputer:", best_path)
-    print("Saved scalers:", imputation_path("sun_imputer_scalers.npz"))
-    print("Validation relative RMSE per bin:", imputation_path("sun_imputer_validation_relative_rmse_per_bin.npy"))
+    print("Saved scalers:", trainerr_path("sun_imputer_scalers.npz"))
+    print("Validation relative RMSE per bin:", trainerr_path("sun_imputer_validation_relative_rmse_per_bin.npy"))
 
 
 if __name__ == "__main__":
