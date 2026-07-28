@@ -13,4 +13,5 @@
 **/.omc
 **/rawdata
 **/sun_processed
+**/__pycache__
 
