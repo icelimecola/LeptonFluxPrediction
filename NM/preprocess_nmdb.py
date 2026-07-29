@@ -19,6 +19,7 @@ from download_nmdb import (
     DEFAULT_END,
     DEFAULT_START,
     DEFAULT_STATIONS,
+    latest_complete_chunk_end,
     parse_date,
     parse_stations,
 )
@@ -690,7 +691,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated stations (default: the paper's 18 stations)",
     )
     parser.add_argument("--start", type=parse_date, default=DEFAULT_START)
-    parser.add_argument("--end", type=parse_date, default=DEFAULT_END)
+    end_selection = parser.add_mutually_exclusive_group()
+    end_selection.add_argument("--end", type=parse_date)
+    end_selection.add_argument(
+        "--latest",
+        action="store_true",
+        help="process through the latest complete --chunk-months block",
+    )
+    parser.add_argument(
+        "--chunk-months",
+        type=int,
+        default=3,
+        help="months per download block when using --latest (default: 3)",
+    )
     parser.add_argument(
         "--iqr-multiplier",
         type=float,
@@ -702,6 +715,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.chunk_months < 1:
+        raise SystemExit("--chunk-months must be at least 1")
+    if args.latest:
+        try:
+            args.end = latest_complete_chunk_end(
+                args.start, args.chunk_months
+            )
+        except ValueError as exc:
+            raise SystemExit(f"--latest: {exc}") from exc
+    elif args.end is None:
+        args.end = DEFAULT_END
     if args.start > args.end:
         raise SystemExit("--start must not be after --end")
     if args.iqr_multiplier <= 0:

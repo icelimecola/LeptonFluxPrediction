@@ -21,7 +21,7 @@ from pathlib import Path
 
 NMDB_URL = "https://www.nmdb.eu/nest/draw_graph.php"
 DEFAULT_START = dt.date(2011, 1, 1)
-DEFAULT_END = dt.date(2024, 8, 1)
+DEFAULT_END = dt.date(2025, 12, 31)
 DEFAULT_STATIONS = (
     "AATB", "APTY", "FSMT", "INVK", "JUNG", "JUNG1",
     "LMKS", "MXCO", "NAIN", "NEWK", "OULU", "PSNM",
@@ -67,6 +67,26 @@ def add_months(day: dt.date, months: int) -> dt.date:
     """Return the first day that is ``months`` months after ``day``."""
     month_index = day.year * 12 + day.month - 1 + months
     return dt.date(month_index // 12, month_index % 12 + 1, 1)
+
+
+def latest_complete_chunk_end(
+    start: dt.date,
+    chunk_months: int,
+    today: dt.date | None = None,
+) -> dt.date:
+    """Return the end of the latest complete month-based chunk from ``start``."""
+    if start.day != 1:
+        raise ValueError("start date must be the first day of a month")
+    if chunk_months < 1:
+        raise ValueError("chunk_months must be at least 1")
+
+    current = today or dt.datetime.now(dt.timezone.utc).date()
+    next_start = start
+    completed_end = start - dt.timedelta(days=1)
+    while add_months(next_start, chunk_months) <= current:
+        next_start = add_months(next_start, chunk_months)
+        completed_end = next_start - dt.timedelta(days=1)
+    return completed_end
 
 
 def iter_chunks(
@@ -353,12 +373,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the 1-based station index and exit",
     )
     parser.add_argument("--start", type=parse_date, default=DEFAULT_START)
-    parser.add_argument("--end", type=parse_date, default=DEFAULT_END)
+    end_selection = parser.add_mutually_exclusive_group()
+    end_selection.add_argument("--end", type=parse_date)
+    end_selection.add_argument(
+        "--latest",
+        action="store_true",
+        help="download through the latest complete --chunk-months block",
+    )
     parser.add_argument(
         "--chunk-months",
         type=int,
-        default=1,
-        help="months per request; 1 is safest for preserving native resolution",
+        default=3,
+        help="months per request (default: 3)",
     )
     parser.add_argument(
         "--resolution",
@@ -410,6 +436,22 @@ def main() -> int:
         return 0
     if args.chunk_months < 1:
         raise SystemExit("--chunk-months must be at least 1")
+    if args.latest:
+        try:
+            args.end = latest_complete_chunk_end(
+                args.start, args.chunk_months
+            )
+        except ValueError as exc:
+            raise SystemExit(f"--latest: {exc}") from exc
+        if args.end < args.start:
+            raise SystemExit(
+                "no complete chunk is available yet for the selected "
+                "--start and --chunk-months"
+            )
+    elif args.end is None:
+        args.end = DEFAULT_END
+    if args.start > args.end:
+        raise SystemExit("--start must not be after --end")
     if args.sleep < 0:
         raise SystemExit("--sleep must not be negative")
     if args.retries < 0:
