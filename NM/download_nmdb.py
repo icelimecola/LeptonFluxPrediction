@@ -18,6 +18,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from station_metadata import nmdb_table_choice, nmdb_table_name
+
 
 NMDB_URL = "https://www.nmdb.eu/nest/draw_graph.php"
 DEFAULT_START = dt.date(2011, 1, 1)
@@ -120,7 +122,7 @@ def build_url(
         ("wget", "1"),
         ("stations[]", station),
         ("output", "ascii"),
-        ("tabchoice", "revori"),
+        ("tabchoice", nmdb_table_choice(station)),
         ("dtype", "corr_for_efficiency"),
         ("date_choice", "bydate"),
         ("start_year", str(start.year)),
@@ -191,8 +193,12 @@ def validate_response(
         )
     if "corr_for_efficiency" not in summary.get("DATA TYPE", "").lower():
         raise NMDBError(f"unexpected data type: {summary.get('DATA TYPE')!r}")
-    if summary.get("NMDB TABLE", "").lower() != "revised original":
-        raise NMDBError(f"unexpected NMDB table: {summary.get('NMDB TABLE')!r}")
+    expected_table = nmdb_table_name(station)
+    if summary.get("NMDB TABLE", "").lower() != expected_table.lower():
+        raise NMDBError(
+            f"unexpected NMDB table: {summary.get('NMDB TABLE')!r}; "
+            f"expected {expected_table!r}"
+        )
 
     averaging = summary.get("AVERAGING", "").strip()
     original_resolution = summary.get("ORIGINAL RES", "").strip()
@@ -293,6 +299,17 @@ def output_name(
 
 def no_data_name(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".no_data")
+
+
+def no_data_marker_matches_table(path: Path, station: str) -> bool:
+    """Return whether a marker was produced for the station's current table."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    marker_table = parse_summary(text).get("NMDB TABLE", "").lower()
+    expected_table = nmdb_table_name(station).lower()
+    if marker_table:
+        return marker_table == expected_table
+    # Markers created before table metadata was added used revised original.
+    return expected_table == "revised original"
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -482,6 +499,10 @@ def main() -> int:
     print(f"Stations: {', '.join(stations)}")
     print(f"Date range: {args.start} to {args.end} (UTC)")
     print(f"Resolution: {args.resolution}")
+    table_summary = ", ".join(
+        f"{station}={nmdb_table_name(station)}" for station in stations
+    )
+    print(f"NMDB tables: {table_summary}")
     print(f"Chunks: {len(chunks)} per station; tasks: {len(tasks)}")
     print(f"Output: {args.output_dir}")
 
@@ -520,15 +541,29 @@ def main() -> int:
             skipped += 1
             continue
         if marker.exists() and not args.overwrite:
+            try:
+                marker_matches = no_data_marker_matches_table(marker, station)
+            except OSError as exc:
+                print(f"  FAILED to read no-data marker: {exc}", file=sys.stderr)
+                failures += 1
+                continue
+            if marker_matches:
+                print(
+                    f"[{index}/{len(tasks)}] skip {station} {start} to {end} "
+                    "(no data marker)"
+                )
+                no_data += 1
+                continue
             print(
-                f"[{index}/{len(tasks)}] skip {station} {start} to {end} "
-                "(no data marker)"
+                f"[{index}/{len(tasks)}] retry {station} {start} to {end}: "
+                "no-data marker belongs to a different NMDB table"
             )
-            no_data += 1
-            continue
 
         url = build_url(station, start, end, resolution=args.resolution)
-        print(f"[{index}/{len(tasks)}] download {station} {start} to {end}")
+        print(
+            f"[{index}/{len(tasks)}] download {station} {start} to {end} "
+            f"[{nmdb_table_name(station)}]"
+        )
         try:
             for attempt in range(args.retries + 1):
                 try:
@@ -557,6 +592,7 @@ def main() -> int:
             marker_text = (
                 "# NMDB no-data marker; this chunk is intentionally left missing.\n"
                 f"# STATION: {station}\n"
+                f"# NMDB TABLE: {nmdb_table_name(station)}\n"
                 f"# START DATE: {start.isoformat()} UTC\n"
                 f"# END DATE: {end.isoformat()} UTC\n"
                 f"# MESSAGE: {exc}\n"

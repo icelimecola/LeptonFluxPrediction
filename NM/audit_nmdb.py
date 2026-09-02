@@ -22,6 +22,7 @@ from download_nmdb import (
     parse_duration_minutes,
     parse_stations,
 )
+from station_metadata import nmdb_table_name
 
 
 FILE_RE = re.compile(
@@ -43,6 +44,7 @@ class FileAudit:
     requested_resolution: str
     status: str
     issues: str
+    nmdb_table: str = ""
     header_start: str = ""
     header_end: str = ""
     original_resolution: str = ""
@@ -208,8 +210,12 @@ def scan_data_file(
     if header_station != station:
         issues.append(f"header station={header_station or '<missing>'}")
         fatal = True
-    if summary.get("NMDB TABLE", "").lower() != "revised original":
-        issues.append(f"table={summary.get('NMDB TABLE', '<missing>')}")
+    expected_table = nmdb_table_name(station)
+    if summary.get("NMDB TABLE", "").lower() != expected_table.lower():
+        issues.append(
+            f"table={summary.get('NMDB TABLE', '<missing>')}, "
+            f"expected={expected_table}"
+        )
         fatal = True
     if "corr_for_efficiency" not in summary.get("DATA TYPE", "").lower():
         issues.append(f"data type={summary.get('DATA TYPE', '<missing>')}")
@@ -290,6 +296,7 @@ def scan_data_file(
         requested_resolution=requested_resolution,
         status=status,
         issues="; ".join(issues),
+        nmdb_table=summary.get("NMDB TABLE", ""),
         header_start=header_start.isoformat(sep=" ") if header_start else "",
         header_end=header_end.isoformat(sep=" ") if header_end else "",
         original_resolution=summary.get("ORIGINAL RES", ""),
@@ -320,6 +327,18 @@ def audit_no_data_marker(
     issues: list[str] = []
     if "NMDB no-data marker" not in text:
         issues.append("unrecognized no-data marker")
+    summary: dict[str, str] = {}
+    for line in text.splitlines():
+        parsed = parse_summary_line(line)
+        if parsed:
+            summary[parsed[0]] = parsed[1]
+    marker_table = summary.get("NMDB TABLE", "")
+    expected_table = nmdb_table_name(station)
+    if marker_table:
+        if marker_table.lower() != expected_table.lower():
+            issues.append(f"table={marker_table}, expected={expected_table}")
+    elif expected_table.lower() != "revised original":
+        issues.append(f"missing NMDB table; expected={expected_table}")
     status = "no_data" if not issues else "invalid"
     return FileAudit(
         path=str(path),
@@ -330,6 +349,7 @@ def audit_no_data_marker(
         requested_resolution=requested_resolution,
         status=status,
         issues="; ".join(issues),
+        nmdb_table=marker_table,
     )
 
 

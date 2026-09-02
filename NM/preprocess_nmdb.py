@@ -201,12 +201,27 @@ def write_daily_csv(
     return raw_observed_days, retained_days, daily_outliers
 
 
-def plot_raw_daily_counts(
+def final_daily_value(
+    accumulator: DailyAccumulator | None,
+    daily_limits: dict[str, float] | None,
+) -> float | None:
+    if accumulator is None or not accumulator.valid_count:
+        return None
+    value = accumulator.value_sum / accumulator.valid_count
+    if daily_limits and (
+        value < daily_limits["lower"] or value > daily_limits["upper"]
+    ):
+        return None
+    return value
+
+
+def plot_final_daily_counts(
     path: Path,
     station: str,
     start: dt.date,
     end: dt.date,
     daily: dict[dt.date, DailyAccumulator],
+    daily_limits: dict[str, float] | None,
 ) -> None:
     try:
         import matplotlib
@@ -223,11 +238,11 @@ def plot_raw_daily_counts(
     dates: list[dt.date] = []
     values: list[float] = []
     for day in date_range(start, end):
-        accumulator = daily.get(day)
-        if accumulator is None or not accumulator.observed_count:
+        value = final_daily_value(daily.get(day), daily_limits)
+        if value is None:
             continue
         dates.append(day)
-        values.append(accumulator.raw_value_sum / accumulator.observed_count)
+        values.append(value)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     figure, axis = plt.subplots(figsize=(10.0, 3.2))
@@ -326,17 +341,18 @@ def write_plot_cache(
     end: dt.date,
     multiplier: float,
     daily: dict[dt.date, DailyAccumulator],
+    daily_limits: dict[str, float] | None,
     highres_limits: dict[str, float] | None,
     histogram: tuple[np.ndarray, np.ndarray] | None,
 ) -> None:
     dates: list[int] = []
     daily_values: list[float] = []
     for day in date_range(start, end):
-        accumulator = daily.get(day)
-        if accumulator is None or not accumulator.observed_count:
+        value = final_daily_value(daily.get(day), daily_limits)
+        if value is None:
             continue
         dates.append(day.toordinal())
-        daily_values.append(accumulator.raw_value_sum / accumulator.observed_count)
+        daily_values.append(value)
 
     if histogram is None:
         histogram_counts = np.asarray([], dtype=np.int64)
@@ -553,7 +569,7 @@ def process_station(
         raw_observed, retained_days, daily_outliers = write_daily_csv(
             output_path, start, end, {}, None
         )
-        plot_raw_daily_counts(plot_path, station, start, end, {})
+        plot_final_daily_counts(plot_path, station, start, end, {}, None)
         plot_raw_distribution(distribution_plot_path, station, None, None)
         write_plot_cache(
             cache_path,
@@ -562,6 +578,7 @@ def process_station(
             end,
             multiplier,
             {},
+            None,
             None,
             None,
         )
@@ -634,7 +651,9 @@ def process_station(
     raw_observed_days, retained_days, daily_outliers = write_daily_csv(
         output_path, start, end, daily, daily_limits
     )
-    plot_raw_daily_counts(plot_path, station, start, end, daily)
+    plot_final_daily_counts(
+        plot_path, station, start, end, daily, daily_limits
+    )
     plot_raw_distribution(
         distribution_plot_path, station, highres_limits, histogram
     )
@@ -645,6 +664,7 @@ def process_station(
         end,
         multiplier,
         daily,
+        daily_limits,
         highres_limits,
         histogram,
     )
