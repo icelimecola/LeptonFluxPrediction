@@ -25,3 +25,23 @@ CUTOFF_RIGIDITY_GV: dict[str, float] = {
     "THUL": 0.30,
     "YKTK": 1.65,
 }
+
+
+# PSNM has no data in ``revised original``. Its finest validated NMDB source
+# is the 1-hour table; all other stations continue to use revised original.
+DEFAULT_NMDB_TABLE_CHOICE = "revori"
+NMDB_TABLE_CHOICE: dict[str, str] = {
+    "PSNM": "1h",
+}
+NMDB_TABLE_NAME = {
+    "revori": "revised original",
+    "1h": "1 hour validated",
+}
+
+
+def nmdb_table_choice(station: str) -> str:
+    return NMDB_TABLE_CHOICE.get(station.upper(), DEFAULT_NMDB_TABLE_CHOICE)
+
+
+def nmdb_table_name(station: str) -> str:
+    return NMDB_TABLE_NAME[nmdb_table_choice(station)]
