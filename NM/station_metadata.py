@@ -45,3 +45,15 @@ def nmdb_table_choice(station: str) -> str:
 
 def nmdb_table_name(station: str) -> str:
     return NMDB_TABLE_NAME[nmdb_table_choice(station)]
+
+
+def stations_by_cutoff_rigidity(stations: list[str]) -> list[str]:
+    """Sort stations by vertical geomagnetic cutoff rigidity, ascending.
+
+    Stations with equal cutoff rigidity are ordered alphabetically by
+    station code, keeping the result deterministic.
+    """
+    return sorted(
+        dict.fromkeys(stations),
+        key=lambda station: (CUTOFF_RIGIDITY_GV[station], station),
+    )
