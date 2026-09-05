@@ -15,7 +15,10 @@ from pathlib import Path
 import numpy as np
 
 from download_nmdb import DEFAULT_STATIONS, parse_stations
-from station_metadata import CUTOFF_RIGIDITY_GV
+from station_metadata import (
+    CUTOFF_RIGIDITY_GV,
+    stations_by_cutoff_rigidity,
+)
 
 
 REFERENCE_STATION = "OULU"
@@ -403,7 +406,21 @@ def plot_daily_counts_panel(
         markersize=1.7 if combined else 2.2,
         color="#178314",
         markeredgewidth=0,
+        label="Daily count rate" if not combined else None,
     )
+    removed = result.manual_outlier | result.kde_outlier
+    removed &= np.isfinite(result.input_values)
+    if removed.any():
+        axis.scatter(
+            np.asarray(dates)[removed],
+            result.input_values[removed],
+            color="#c5221f",
+            marker="x",
+            s=11,
+            linewidths=0.7,
+            zorder=3,
+            label="Removed by OULU filter" if not combined else None,
+        )
     axis.set_xlim(dates[0], dates[-1])
     axis.set_xlabel("Year")
     axis.set_ylabel("Count rate (counts/s)")
@@ -425,6 +442,122 @@ def plot_daily_counts_panel(
         fontsize=11 if combined else 14,
         fontweight="bold",
     )
+    if not combined:
+        axis.legend(loc="best", fontsize=9, frameon=False)
+
+
+def draw_kde_process_axes(axes, result: StationResult) -> None:
+    """Three-panel KDE walkthrough: fit, CDF with quantile cuts, cut bounds.
+
+    Panel (a): residual histogram with the KDE density curve.
+    Panel (b): CDF built from the KDE fit with the 0.15%/99.85% cut lines.
+    Panel (c): residual histogram with the two cut bounds (no KDE curve).
+    The reference station (OULU) has no KDE output; its figure is a
+    placeholder that only shows the residual distribution.
+    """
+    finite = result.deviation[np.isfinite(result.deviation)]
+    has_kde = (
+        result.kde_x is not None
+        and result.kde_pdf is not None
+        and result.kde_lower is not None
+        and result.kde_upper is not None
+    )
+
+    # --- (a) residual histogram + KDE fitted density ---
+    axis = axes[0]
+    if finite.size and np.ptp(finite) > 0:
+        axis.hist(
+            finite,
+            bins=70,
+            density=True,
+            color="#9aa0a6",
+            alpha=0.65,
+            linewidth=0,
+        )
+        axis.set_xlim(finite.min(), finite.max())
+    if has_kde:
+        axis.plot(result.kde_x, result.kde_pdf, color="#1a73e8", linewidth=1.4)
+    axis.set_xlabel("Deviation from 60-day mean")
+    axis.set_ylabel("Density")
+    axis.set_title("(a) Residuals + KDE fit")
+    axis.grid(alpha=0.18, linewidth=0.5)
+
+    # --- (b) CDF with the two quantile cut lines ---
+    axis = axes[1]
+    if has_kde:
+        pdf = np.asarray(result.kde_pdf, dtype=np.float64)
+        x = np.asarray(result.kde_x, dtype=np.float64)
+        spacing = x[1] - x[0]
+        cdf = np.cumsum(pdf) * spacing
+        cdf /= cdf[-1]
+        axis.plot(x, cdf, color="#1a73e8", linewidth=1.4)
+        axis.axhline(
+            KDE_LOWER_QUANTILE, color="#c5221f", linestyle="--", linewidth=0.9
+        )
+        axis.axhline(
+            KDE_UPPER_QUANTILE, color="#c5221f", linestyle="--", linewidth=0.9
+        )
+        axis.axvline(
+            result.kde_lower, color="#c5221f", linestyle="--", linewidth=0.9
+        )
+        axis.axvline(
+            result.kde_upper, color="#c5221f", linestyle="--", linewidth=0.9
+        )
+        axis.scatter(
+            [result.kde_lower], [KDE_LOWER_QUANTILE], color="#c5221f",
+            s=20, zorder=3,
+        )
+        axis.scatter(
+            [result.kde_upper], [KDE_UPPER_QUANTILE], color="#c5221f",
+            s=20, zorder=3,
+        )
+    else:
+        axis.set_xticks([])
+        axis.set_yticks([])
+        axis.text(
+            0.5,
+            0.5,
+            "Reference station — not KDE-filtered\n"
+            "(no CDF / bounds computed)",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+        )
+    axis.set_xlabel("Deviation from 60-day mean")
+    axis.set_ylabel("CDF")
+    axis.set_title("(b) CDF + cut quantiles")
+    axis.grid(alpha=0.18, linewidth=0.5)
+
+    # --- (c) residual histogram + cut bounds (no KDE curve) ---
+    axis = axes[2]
+    if finite.size and np.ptp(finite) > 0:
+        axis.hist(
+            finite,
+            bins=70,
+            density=True,
+            color="#9aa0a6",
+            alpha=0.65,
+            linewidth=0,
+        )
+        axis.set_xlim(finite.min(), finite.max())
+    if has_kde:
+        axis.axvline(result.kde_lower, color="#c5221f", linewidth=1.3)
+        axis.axvline(result.kde_upper, color="#c5221f", linewidth=1.3)
+    else:
+        axis.set_xticks([])
+        axis.set_yticks([])
+        axis.text(
+            0.5,
+            0.5,
+            "Reference station — not KDE-filtered",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+        )
+    axis.set_xlabel("Deviation from 60-day mean")
+    axis.set_ylabel("Density")
+    axis.set_title("(c) Residuals + cut bounds")
+    axis.grid(alpha=0.18, linewidth=0.5)
 
 
 def write_plots(
@@ -474,6 +607,24 @@ def write_plots(
             plt.close(figure)
             outputs.append(path)
 
+    kde_process_dir = plot_dir / "kde_process"
+    kde_process_dir.mkdir(parents=True, exist_ok=True)
+    for station in stations:
+        result = results[station]
+        figure, axes = plt.subplots(3, 1, figsize=(9.0, 8.5))
+        draw_kde_process_axes(axes, result)
+        figure.suptitle(
+            f"{station} {CUTOFF_RIGIDITY_GV[station]:.2f} GV — "
+            "KDE filtering walkthrough",
+            fontsize=14,
+            fontweight="bold",
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.97))
+        path = kde_process_dir / f"{station}_kde_process.pdf"
+        figure.savefig(path, format="pdf", bbox_inches="tight")
+        plt.close(figure)
+        outputs.append(path)
+
     date_suffix = f"{dates[0]:%Y%m%d}_{dates[-1]:%Y%m%d}"
     for group_start in range(0, len(stations), PLOT_GROUP_SIZE):
         group = stations[group_start : group_start + PLOT_GROUP_SIZE]
@@ -482,8 +633,8 @@ def write_plots(
         figure, axes = plt.subplots(3, 2, figsize=(13.0, 10.0), squeeze=False)
         occupied: set[tuple[int, int]] = set()
         for index, station in enumerate(group):
-            row = index % 3
-            column = index // 3
+            row = index // 2
+            column = index % 2
             occupied.add((row, column))
             plot_ratio_panel(
                 axes[row, column],
@@ -521,8 +672,8 @@ def write_plots(
             figure, axes = plt.subplots(3, 2, figsize=(13.0, 10.0), squeeze=False)
             occupied: set[tuple[int, int]] = set()
             for index, station in enumerate(group):
-                row = index % 3
-                column = index // 3
+                row = index // 2
+                column = index % 2
                 occupied.add((row, column))
                 plot_daily_counts_panel(
                     axes[row, column],
@@ -579,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    stations = list(dict.fromkeys(args.stations))
+    stations = stations_by_cutoff_rigidity(args.stations)
     missing_metadata = sorted(set(stations) - CUTOFF_RIGIDITY_GV.keys())
     if missing_metadata:
         raise SystemExit(

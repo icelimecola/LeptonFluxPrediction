@@ -23,7 +23,10 @@ from download_nmdb import (
     parse_date,
     parse_stations,
 )
-from station_metadata import CUTOFF_RIGIDITY_GV
+from station_metadata import (
+    CUTOFF_RIGIDITY_GV,
+    stations_by_cutoff_rigidity,
+)
 
 
 HISTOGRAM_BINS = 160
@@ -495,8 +498,8 @@ def write_available_combined_plots(
 
         figure, axes = plt.subplots(3, 2, figsize=(13.0, 10.0))
         for index, (station, payload) in enumerate(zip(group, payloads)):
-            row = index % 3
-            column = index // 3
+            row = index // 2
+            column = index % 2
             plot_distribution_panel(axes[row, column], station, payload)
         figure.tight_layout()
         temporary_path = distribution_path.with_name(
@@ -508,8 +511,8 @@ def write_available_combined_plots(
 
         figure, axes = plt.subplots(3, 2, figsize=(13.0, 10.0))
         for index, (station, payload) in enumerate(zip(group, payloads)):
-            row = index % 3
-            column = index // 3
+            row = index // 2
+            column = index % 2
             plot_daily_panel(axes[row, column], station, payload, mdates)
         figure.tight_layout()
         temporary_path = daily_path.with_name(
@@ -789,7 +792,7 @@ def main() -> int:
         print(f"  distribution: {report['distribution_plot']}")
 
     combined_plots = write_available_combined_plots(
-        plot_dir, list(DEFAULT_STATIONS)
+        plot_dir, stations_by_cutoff_rigidity(list(DEFAULT_STATIONS))
     )
     for path in combined_plots:
         print(f"Combined plot: {path}")
