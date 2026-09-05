@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from download_nmdb import DEFAULT_STATIONS, parse_stations
+from nmdb_download import DEFAULT_STATIONS, parse_stations
 from station_metadata import (
     CUTOFF_RIGIDITY_GV,
     stations_by_cutoff_rigidity,

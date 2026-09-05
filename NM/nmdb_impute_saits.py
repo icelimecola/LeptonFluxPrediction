@@ -2,7 +2,7 @@
 """Impute missing neutron-monitor daily counts with SAITS.
 
 Reads the OULU-filtered daily count-rate matrix produced by
-``filter_nmdb_oulu.py`` and fills every gap (genuine missing days plus the
+``nmdb_filter_kde_oulu.py`` and fills every gap (genuine missing days plus the
 days removed by the OULU ratio/KDE filter) using the SAITS model from PyPOTS,
 mirroring the reference implementation:
     FluxPrediction/neutron/process_neutron12_impute.py
@@ -105,7 +105,7 @@ def _load_pypots():
         from pypots.nn.functional import calc_mae
     except ImportError as exc:
         raise RuntimeError(
-            "impute_nmdb_saits.py requires PyPOTS (and its deps torch/sklearn); "
+            "nmdb_impute_saits.py requires PyPOTS (and its deps torch/sklearn); "
             "install it in the run environment then rerun"
         ) from exc
     return SAITS, calc_mae

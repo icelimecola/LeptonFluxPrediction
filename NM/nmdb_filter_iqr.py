@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from audit_nmdb import NULL_VALUES, parse_filename, scan_data_file
-from download_nmdb import (
+from nmdb_download import (
     DEFAULT_END,
     DEFAULT_START,
     DEFAULT_STATIONS,

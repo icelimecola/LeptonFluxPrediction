@@ -13,7 +13,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from download_nmdb import (
+from nmdb_download import (
     DEFAULT_END,
     DEFAULT_START,
     DEFAULT_STATIONS,
