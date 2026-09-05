@@ -709,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=base / "rawdata" / "nmdb_oulu_filter",
+        default=base / "rawdata" / "nmdb_filter_kde_oulu",
     )
     parser.add_argument(
         "--stations",
@@ -796,12 +796,28 @@ def main() -> int:
     data_dir = args.output_dir / "data"
     counts_path = data_dir / "nm_daily_oulu_filtered_counts.csv"
     ratios_path = data_dir / "nm_daily_oulu_filtered_ratios.csv"
+    counts_npy = data_dir / "nm_daily_oulu_filtered_counts.npy"
+    npz_path = data_dir / "nm_daily_oulu_filtered.npz"
     if not args.diagnostic_only:
         write_combined_csv(
             counts_path, dates, stations, results, "final_counts"
         )
         write_combined_csv(
             ratios_path, dates, stations, results, "final_ratio"
+        )
+        counts_matrix = np.column_stack(
+            [np.asarray(results[station].final_counts) for station in stations]
+        )
+        ratios_matrix = np.column_stack(
+            [np.asarray(results[station].final_ratio) for station in stations]
+        )
+        np.save(counts_npy, counts_matrix)
+        np.savez_compressed(
+            npz_path,
+            counts=counts_matrix,
+            ratios=ratios_matrix,
+            dates=np.asarray(dates, dtype="datetime64[D]"),
+            stations=np.asarray(stations),
         )
 
     plot_outputs: list[Path] = []
@@ -825,6 +841,8 @@ def main() -> int:
         "stations": reports,
         "combined_counts": "" if args.diagnostic_only else str(counts_path),
         "combined_ratios": "" if args.diagnostic_only else str(ratios_path),
+        "combined_counts_npy": "" if args.diagnostic_only else str(counts_npy),
+        "combined_npz": "" if args.diagnostic_only else str(npz_path),
         "plots": [str(path) for path in plot_outputs],
         "notes": [
             "This stage only removes additional values; it does not restore IQR outliers.",

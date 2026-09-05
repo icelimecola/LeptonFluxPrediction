@@ -31,7 +31,11 @@ from pathlib import Path
 
 import numpy as np
 
-from station_metadata import CUTOFF_RIGIDITY_GV
+from nmdb_download import DEFAULT_STATIONS
+from station_metadata import (
+    CUTOFF_RIGIDITY_GV,
+    stations_by_cutoff_rigidity,
+)
 
 
 @dataclass
@@ -367,10 +371,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--input",
         type=Path,
         default=(
-            base / "rawdata" / "nmdb_oulu_filter" / "data"
-            / "nm_daily_oulu_filtered_counts.csv"
+            base / "rawdata" / "nmdb_filter_kde_oulu" / "data"
+            / "nm_daily_oulu_filtered_counts.npy"
         ),
-        help="OULU-filtered daily counts matrix (date x station)",
+        help=(
+            "input matrix: .npy (T,D) with NaN gaps (default), .npz "
+            "('counts' member), or the legacy .csv (date x station)"
+        ),
+    )
+    parser.add_argument(
+        "--start-date",
+        default="2011-01-01",
+        help=(
+            "first date of the consecutive daily grid used to label rows "
+            "when reading a bare .npy/.npz matrix (default: 2011-01-01)"
+        ),
     )
     parser.add_argument(
         "--output-dir", type=Path, default=base / "rawdata" / "nmdb_imputed",
@@ -395,9 +410,29 @@ def main() -> int:
     if not args.input.is_file():
         raise SystemExit(f"input file does not exist: {args.input}")
 
-    dates, stations, data = read_counts_matrix(args.input)
+    if args.input.suffix == ".csv":
+        # 兼容旧输入：CSV 自带日期与站名
+        dates, stations, data = read_counts_matrix(args.input)
+    else:
+        if args.input.suffix == ".npz":
+            with np.load(args.input) as npz_file:
+                data = np.array(npz_file["counts"])
+        else:
+            data = np.load(args.input)
+        data = np.asarray(data, dtype=np.float64)
+        if data.ndim != 2:
+            raise SystemExit("input matrix must be 2-D (T, D)")
+        # 纯数值矩阵：站名取默认 18 站（Rc 升序），日期按连续日网格约定重建
+        stations = stations_by_cutoff_rigidity(list(DEFAULT_STATIONS))
+        try:
+            start_date = dt.date.fromisoformat(args.start_date)
+        except ValueError as exc:
+            raise SystemExit(f"--start-date invalid: {args.start_date}") from exc
+        dates = [start_date + dt.timedelta(days=i) for i in range(data.shape[0])]
     if data.shape[1] != len(stations):
-        raise SystemExit("matrix columns do not match station header")
+        raise SystemExit("matrix columns do not match station set")
+    if len(dates) != data.shape[0]:
+        raise SystemExit("date axis length does not match matrix rows")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
