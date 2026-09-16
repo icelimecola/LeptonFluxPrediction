@@ -25,7 +25,9 @@ import argparse
 import csv
 import datetime as dt
 import json
+import logging
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,6 +82,30 @@ def write_imputed_csv(path: Path, dates, stations, matrix) -> None:
             )
 
 
+def parse_station_list(text: str) -> list[str]:
+    """Parse a comma-separated station list, e.g. 'INVK,APTY,THUL'."""
+    return [item.strip().upper() for item in text.split(",") if item.strip()]
+
+
+def select_station_subset(
+    data: np.ndarray,
+    stations: list[str],
+    requested: list[str] | None,
+) -> tuple[np.ndarray, list[str]]:
+    """Keep only the requested stations, preserving the input column order."""
+    if not requested:
+        return data, list(stations)
+    order = {name: index for index, name in enumerate(stations)}
+    missing = [name for name in requested if name not in order]
+    if missing:
+        raise SystemExit(
+            "--stations not present in the input matrix: " + ", ".join(missing)
+        )
+    chosen = sorted(dict.fromkeys(requested), key=lambda name: order[name])
+    indices = [order[name] for name in chosen]
+    return data[:, indices], chosen
+
+
 def apply_mcar_mask(matrix: np.ndarray, rate: float, seed: int) -> np.ndarray:
     """Mask ``rate`` of the observed values, leaving original NaN untouched."""
     rng = np.random.default_rng(seed)
@@ -131,6 +157,75 @@ def make_model(window: int, n_features: int, epochs: int):
     )
 
 
+class _LossLoggerHandler(logging.Handler):
+    """Capture per-epoch train/val loss from PyPOTS training logs.
+
+    PyPOTS does not expose a per-epoch loss history after ``fit``; it only logs
+    lines like ``Epoch 003 - training loss (MAE): 0.0521, validation MSE: 0.0031``.
+    This handler parses those records into ``(epoch, train_loss, val_loss)``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[tuple[int, float, float | None]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "Epoch" not in record.getMessage() or "training loss" not in record.getMessage():
+            return
+        text = record.getMessage()
+        m = re.search(r"Epoch (\d+) - training loss \(.*?\): ([\d.eE+-]+)", text)
+        if m is None:
+            return
+        epoch = int(m.group(1))
+        train_loss = float(m.group(2))
+        v = re.search(r"validation .*?: ([\d.eE+-]+)", text)
+        val_loss = float(v.group(1)) if v is not None else None
+        self.records.append((epoch, train_loss, val_loss))
+
+
+def plot_loss_history(
+    plot_dir: Path,
+    history: list[tuple[int, float, float | None]],
+    test_mae: float | None,
+) -> Path:
+    """Plot training/validation loss vs epoch, styled like the LSTM figure."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    path = plot_dir / "model_loss.pdf"
+
+    epochs_list = [item[0] for item in history]
+    train_loss = [item[1] for item in history]
+    val_epochs = [item[0] for item in history if item[2] is not None]
+    val_loss = [item[2] for item in history if item[2] is not None]
+
+    figure, axis = plt.subplots(figsize=(7.0, 5.0))
+    axis.plot(epochs_list, train_loss, label="training (MAE)")          # 默认色（蓝）
+    if val_loss:
+        axis.plot(val_epochs, val_loss, label="validation (MSE)")       # 默认色（橙）
+    if test_mae is not None:
+        axis.axhline(
+            test_mae,
+            color="C2",                                                  # 默认绿
+            linestyle="--",
+            linewidth=1.0,
+            label=f"test (MAE) ({test_mae:.4f})",
+        )
+    axis.set_yscale("log")
+    axis.set_title("model loss")
+    axis.set_ylabel("loss")
+    axis.set_xlabel("epoch")
+    axis.tick_params(direction="in", top=True, right=True)
+    axis.legend(loc="upper right", fontsize=9, frameon=False)
+    figure.tight_layout()
+    figure.savefig(path, format="pdf", bbox_inches="tight")
+    plt.close(figure)
+    return path
+
+
 def train_and_evaluate(
     scaled: np.ndarray,
     window: int,
@@ -139,8 +234,13 @@ def train_and_evaluate(
     seed: int,
     n_features: int,
     do_eval: bool,
-) -> tuple[object, float | None]:
+) -> tuple[object, float | None, list[tuple[int, float, float | None]]]:
     SAITS, calc_mae = _load_pypots()
+    from pypots.utils.logging import logger as pypots_logger
+
+    handler = _LossLoggerHandler()
+    pypots_logger.addHandler(handler)
+
     t_steps = scaled.shape[0]
 
     if do_eval:
@@ -161,21 +261,27 @@ def train_and_evaluate(
         test_ori_w = sliding_windows(test_ori, window)
 
         model = make_model(window, n_features, epochs)
-        model.fit({"X": train_w}, {"X": val_w, "X_ori": val_ori_w})
+        try:
+            model.fit({"X": train_w}, {"X": val_w, "X_ori": val_ori_w})
+        finally:
+            pypots_logger.removeHandler(handler)
 
         test_input = test_w[0][np.newaxis, ...]       # (1, window, D)
         test_ground = test_ori_w[0][np.newaxis, ...]
         imputed = model.impute({"X": test_input})
         mask = np.isnan(test_input) ^ np.isnan(test_ground)
         mae = float(calc_mae(imputed, np.nan_to_num(test_ground), mask))
-        return model, mae
+        return model, mae, handler.records
 
     # No evaluation: train on the full-window set so the model can impute later.
     # No ground truth exists here, so pass no validation set.
     windows = sliding_windows(scaled, window)
     model = make_model(window, n_features, epochs)
-    model.fit({"X": windows})
-    return model, None
+    try:
+        model.fit({"X": windows})
+    finally:
+        pypots_logger.removeHandler(handler)
+    return model, None, handler.records
 
 
 def impute_full(scaled: np.ndarray, window: int, model) -> np.ndarray:
@@ -398,6 +504,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-eval", action="store_true", help="skip the MCAR-30%% MAE check"
     )
     parser.add_argument("--no-plots", action="store_true", help="skip PDFs")
+    parser.add_argument(
+        "--stations",
+        type=parse_station_list,
+        default=None,
+        help=(
+            "comma-separated subset of stations to impute, e.g. "
+            "'INVK,APTY,THUL' (default: all stations in the input matrix). "
+            "The subset keeps the column order of the input matrix."
+        ),
+    )
     return parser
 
 
@@ -417,13 +533,18 @@ def main() -> int:
         if args.input.suffix == ".npz":
             with np.load(args.input) as npz_file:
                 data = np.array(npz_file["counts"])
+                stations = (
+                    [str(name) for name in npz_file["stations"]]
+                    if "stations" in npz_file.files
+                    else stations_by_cutoff_rigidity(list(DEFAULT_STATIONS))
+                )
         else:
             data = np.load(args.input)
+            stations = stations_by_cutoff_rigidity(list(DEFAULT_STATIONS))
         data = np.asarray(data, dtype=np.float64)
         if data.ndim != 2:
             raise SystemExit("input matrix must be 2-D (T, D)")
-        # 纯数值矩阵：站名取默认 18 站（Rc 升序），日期按连续日网格约定重建
-        stations = stations_by_cutoff_rigidity(list(DEFAULT_STATIONS))
+        # 纯数值矩阵：日期按连续日网格约定重建
         try:
             start_date = dt.date.fromisoformat(args.start_date)
         except ValueError as exc:
@@ -431,6 +552,10 @@ def main() -> int:
         dates = [start_date + dt.timedelta(days=i) for i in range(data.shape[0])]
     if data.shape[1] != len(stations):
         raise SystemExit("matrix columns do not match station set")
+
+    # optional station subset (e.g. only the stations similar to OULU)
+    data, stations = select_station_subset(data, stations, args.stations)
+
     if len(dates) != data.shape[0]:
         raise SystemExit("date axis length does not match matrix rows")
 
@@ -441,7 +566,7 @@ def main() -> int:
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(data)
 
-    model, mae = train_and_evaluate(
+    model, mae, loss_history = train_and_evaluate(
         scaled,
         args.window,
         args.epochs,
@@ -452,6 +577,14 @@ def main() -> int:
     )
     if mae is not None:
         print(f"SAITS MAE (MCAR {args.mask_rate:.0%}): {mae:.6f}")
+    if loss_history:
+        first_epoch = loss_history[0][0]
+        last_epoch = loss_history[-1][0]
+        train_last = loss_history[-1][1]
+        print(
+            f"train loss: epoch {first_epoch} -> {last_epoch}, "
+            f"final train loss {train_last:.6f}"
+        )
 
     print("Imputing full matrix ...")
     imputed_scaled = impute_full(scaled, args.window, model)
@@ -464,22 +597,28 @@ def main() -> int:
 
     output_plots: list[str] = []
     if not args.no_plots:
-        plot_dir = args.output_dir / "plots" / "imputed"
+        plots_root = args.output_dir / "plots"
+        imputed_dir = plots_root / "imputed"
         for index, station in enumerate(stations):
             output_plots.append(
-                str(plot_imputed(plot_dir, dates, station, index, data, imputed))
+                str(plot_imputed(imputed_dir, dates, station, index, data, imputed))
             )
         output_plots.extend(
             write_combined_imputed(
-                plot_dir, dates, stations, data, imputed
+                plots_root, dates, stations, data, imputed
             )
         )
+        if loss_history:
+            output_plots.append(
+                str(plot_loss_history(plots_root, loss_history, mae))
+            )
 
     summary = {
         "date_range": [dates[0].isoformat(), dates[-1].isoformat()],
         "n_days": len(dates),
         "stations": stations,
         "n_stations": len(stations),
+        "requested_stations": args.stations,
         "window": args.window,
         "epochs": args.epochs,
         "mask_rate": args.mask_rate,
