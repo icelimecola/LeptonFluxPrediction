@@ -644,24 +644,15 @@ def main() -> int:
             )
             downloaded += 1
         except NMDBNoData as exc:
-            marker_text = (
-                "# NMDB no-data marker; this chunk is intentionally left missing.\n"
-                f"# STATION: {station}\n"
-                f"# NMDB TABLE: {effective_table_name(station, args.table)}\n"
-                f"# START DATE: {start.isoformat()} UTC\n"
-                f"# END DATE: {end.isoformat()} UTC\n"
-                f"# MESSAGE: {exc}\n"
+            # No marker file is written: an empty chunk is only reported (and
+            # counted), so a re-run simply asks NEST again instead of leaving
+            # ``.no_data`` files in the output directory. Reading legacy markers
+            # is still supported below, so pre-existing ones keep acting as a
+            # cache.
+            print(
+                f"  no data: {station} {start} to {end} "
+                f"[{effective_table_name(station, args.table)}] ({exc})"
             )
-            try:
-                write_atomic(marker, marker_text)
-            except OSError as marker_exc:
-                print(
-                    f"  FAILED to write no-data marker: {marker_exc}",
-                    file=sys.stderr,
-                )
-                failures += 1
-                continue
-            print(f"  no data; recorded {marker.name}")
             no_data += 1
         except (NMDBError, OSError, UnicodeError) as exc:
             print(f"  FAILED: {exc}", file=sys.stderr)
