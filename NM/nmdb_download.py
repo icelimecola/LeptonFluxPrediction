@@ -18,12 +18,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from station_metadata import nmdb_table_choice, nmdb_table_name
+from station_metadata import NMDB_TABLE_NAME, nmdb_table_choice
 
 
 NMDB_URL = "https://www.nmdb.eu/nest/draw_graph.php"
 DEFAULT_START = dt.date(2011, 1, 1)
 DEFAULT_END = dt.date(2025, 12, 31)
+# NMDB table choices accepted by ``--table``. ``ori``/``revori``/``1h`` are the
+# three tables NEST exposes; a station's early years often exist only in ``1h``
+# even though its modern era uses ``revori``, which is why the choice can be
+# overridden per run.
+TABLE_CHOICES = ("ori", "revori", "1h")
 DEFAULT_STATIONS = (
     "AATB", "APTY", "FSMT", "INVK", "JUNG", "JUNG1",
     "LMKS", "MXCO", "NAIN", "NEWK", "OULU", "PSNM",
@@ -109,6 +114,30 @@ def iter_chunks(
     return chunks
 
 
+def effective_table_choice(station: str, table: str | None = None) -> str:
+    """Return the NMDB table choice to use for ``station``.
+
+    ``table`` (from ``--table``) overrides the per-station default declared in
+    ``station_metadata``. Historical backfills need this: the early years of a
+    station often exist only in the ``1h`` table while its modern era uses
+    ``revori``. The override is deliberately *strict* -- it never lets NEST
+    silently substitute a different table, because for some stations the tables
+    disagree by several percent (e.g. AATB, LMKS), and a silent substitution
+    would corrupt the series without any error.
+    """
+    return table or nmdb_table_choice(station)
+
+
+def effective_table_name(station: str, table: str | None = None) -> str:
+    """Human-readable NMDB table name for the effective table choice.
+
+    Note ``station_metadata.nmdb_table_name`` is keyed by *station*, so it
+    cannot be reused here: an explicit ``--table`` override has to be resolved
+    to its display name through ``NMDB_TABLE_NAME`` directly.
+    """
+    return NMDB_TABLE_NAME[effective_table_choice(station, table)]
+
+
 def build_url(
     station: str,
     start: dt.date,
@@ -116,13 +145,14 @@ def build_url(
     *,
     resolution: str,
     force: bool = True,
+    table: str | None = None,
 ) -> str:
     """Build the official NEST ASCII query URL."""
     params: list[tuple[str, str]] = [
         ("wget", "1"),
         ("stations[]", station),
         ("output", "ascii"),
-        ("tabchoice", nmdb_table_choice(station)),
+        ("tabchoice", effective_table_choice(station, table)),
         ("dtype", "corr_for_efficiency"),
         ("date_choice", "bydate"),
         ("start_year", str(start.year)),
@@ -178,7 +208,7 @@ def parse_duration_minutes(value: str) -> int | None:
 
 
 def validate_response(
-    text: str, station: str, resolution: str
+    text: str, station: str, resolution: str, table: str | None = None
 ) -> tuple[dict[str, str], int]:
     if "sorry, no data available" in text.lower():
         raise NMDBNoData(f"NMDB reports no data for {station}")
@@ -193,11 +223,13 @@ def validate_response(
         )
     if "corr_for_efficiency" not in summary.get("DATA TYPE", "").lower():
         raise NMDBError(f"unexpected data type: {summary.get('DATA TYPE')!r}")
-    expected_table = nmdb_table_name(station)
+    expected_table = effective_table_name(station, table)
     if summary.get("NMDB TABLE", "").lower() != expected_table.lower():
         raise NMDBError(
             f"unexpected NMDB table: {summary.get('NMDB TABLE')!r}; "
-            f"expected {expected_table!r}"
+            f"expected {expected_table!r}. NEST silently substitutes another "
+            f"table when the requested one has no data for the range; pass "
+            f"--table to request the table that actually covers this period."
         )
 
     averaging = summary.get("AVERAGING", "").strip()
@@ -301,11 +333,13 @@ def no_data_name(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".no_data")
 
 
-def no_data_marker_matches_table(path: Path, station: str) -> bool:
+def no_data_marker_matches_table(
+    path: Path, station: str, table: str | None = None
+) -> bool:
     """Return whether a marker was produced for the station's current table."""
     text = path.read_text(encoding="utf-8", errors="replace")
     marker_table = parse_summary(text).get("NMDB TABLE", "").lower()
-    expected_table = nmdb_table_name(station).lower()
+    expected_table = effective_table_name(station, table).lower()
     if marker_table:
         return marker_table == expected_table
     # Markers created before table metadata was added used revised original.
@@ -410,6 +444,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="requested minutes, or 'best' for finest native resolution (default)",
     )
     parser.add_argument(
+        "--table",
+        choices=TABLE_CHOICES,
+        default=None,
+        help=(
+            "override the NMDB table for every selected station (default: the "
+            "per-station choice from station_metadata). Use '1h' for historical "
+            "backfills, where a station's early years exist only in the 1 hour "
+            "validated table. The response table is always validated strictly, "
+            "so NEST cannot silently substitute a different one."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="default: rawdata/nmdb_best or rawdata/nmdb_<minutes>min",
@@ -500,7 +546,7 @@ def main() -> int:
     print(f"Date range: {args.start} to {args.end} (UTC)")
     print(f"Resolution: {args.resolution}")
     table_summary = ", ".join(
-        f"{station}={nmdb_table_name(station)}" for station in stations
+        f"{station}={effective_table_name(station, args.table)}" for station in stations
     )
     print(f"NMDB tables: {table_summary}")
     print(f"Chunks: {len(chunks)} per station; tasks: {len(tasks)}")
@@ -526,7 +572,10 @@ def main() -> int:
         if path.exists() and not args.overwrite:
             try:
                 summary, rows = validate_response(
-                    path.read_text(encoding="utf-8"), station, args.resolution
+                    path.read_text(encoding="utf-8"),
+                    station,
+                    args.resolution,
+                    args.table,
                 )
             except (OSError, UnicodeError, NMDBError) as exc:
                 print(f"[{index}/{len(tasks)}] invalid existing file {path}: {exc}")
@@ -542,7 +591,9 @@ def main() -> int:
             continue
         if marker.exists() and not args.overwrite:
             try:
-                marker_matches = no_data_marker_matches_table(marker, station)
+                marker_matches = no_data_marker_matches_table(
+                    marker, station, args.table
+                )
             except OSError as exc:
                 print(f"  FAILED to read no-data marker: {exc}", file=sys.stderr)
                 failures += 1
@@ -559,10 +610,12 @@ def main() -> int:
                 "no-data marker belongs to a different NMDB table"
             )
 
-        url = build_url(station, start, end, resolution=args.resolution)
+        url = build_url(
+            station, start, end, resolution=args.resolution, table=args.table
+        )
         print(
             f"[{index}/{len(tasks)}] download {station} {start} to {end} "
-            f"[{nmdb_table_name(station)}]"
+            f"[{effective_table_name(station, args.table)}]"
         )
         try:
             for attempt in range(args.retries + 1):
@@ -578,7 +631,9 @@ def main() -> int:
                         f"{attempt + 1}/{args.retries} in {delay:g}s"
                     )
                     time.sleep(delay)
-            summary, rows = validate_response(text, station, args.resolution)
+            summary, rows = validate_response(
+                text, station, args.resolution, args.table
+            )
             if marker.exists():
                 marker.unlink()
             write_atomic(path, text)
@@ -592,7 +647,7 @@ def main() -> int:
             marker_text = (
                 "# NMDB no-data marker; this chunk is intentionally left missing.\n"
                 f"# STATION: {station}\n"
-                f"# NMDB TABLE: {nmdb_table_name(station)}\n"
+                f"# NMDB TABLE: {effective_table_name(station, args.table)}\n"
                 f"# START DATE: {start.isoformat()} UTC\n"
                 f"# END DATE: {end.isoformat()} UTC\n"
                 f"# MESSAGE: {exc}\n"
