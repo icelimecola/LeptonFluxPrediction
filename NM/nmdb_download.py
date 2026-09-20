@@ -146,8 +146,18 @@ def build_url(
     resolution: str,
     force: bool = True,
     table: str | None = None,
+    display_null: str = "1",
 ) -> str:
-    """Build the official NEST ASCII query URL."""
+    """Build the official NEST ASCII query URL.
+
+    ``display_null`` maps to NEST's "display null timestamps" option. With
+    ``"1"`` (the historical default) NEST pads the response to the full
+    requested grid, emitting ``null`` rows for missing slots -- but its padding
+    is off by one, so for some archives it also emits a ``null`` row that
+    duplicates the timestamp of the next real value, and for a range spanning a
+    native-resolution change it can fail outright with HTTP 500. ``"0"`` returns
+    only real values, leaving gaps implicit.
+    """
     params: list[tuple[str, str]] = [
         ("wget", "1"),
         ("stations[]", station),
@@ -168,7 +178,7 @@ def build_url(
         ("tresolution", str(RESOLUTIONS[resolution])),
         ("yunits", "0"),
         ("smoothval", "0"),
-        ("display_null", "1"),
+        ("display_null", display_null),
     ]
     if force:
         params.append(("force", "1"))
@@ -456,6 +466,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--display-null",
+        choices=("0", "1"),
+        default="1",
+        help=(
+            "NEST 'display null timestamps' flag (default: 1, unchanged). Use 0 "
+            "to receive only real values: NEST's null padding is off by one, so "
+            "with 1 some archives get a null row that duplicates the next real "
+            "timestamp, and a range spanning a native-resolution change can "
+            "fail with HTTP 500."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="default: rawdata/nmdb_best or rawdata/nmdb_<minutes>min",
@@ -545,6 +567,7 @@ def main() -> int:
     print(f"Stations: {', '.join(stations)}")
     print(f"Date range: {args.start} to {args.end} (UTC)")
     print(f"Resolution: {args.resolution}")
+    print(f"Display null timestamps: {args.display_null}")
     table_summary = ", ".join(
         f"{station}={effective_table_name(station, args.table)}" for station in stations
     )
@@ -611,7 +634,12 @@ def main() -> int:
             )
 
         url = build_url(
-            station, start, end, resolution=args.resolution, table=args.table
+            station,
+            start,
+            end,
+            resolution=args.resolution,
+            table=args.table,
+            display_null=args.display_null,
         )
         print(
             f"[{index}/{len(tasks)}] download {station} {start} to {end} "
