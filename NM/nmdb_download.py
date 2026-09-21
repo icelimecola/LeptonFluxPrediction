@@ -138,6 +138,21 @@ def effective_table_name(station: str, table: str | None = None) -> str:
     return NMDB_TABLE_NAME[effective_table_choice(station, table)]
 
 
+# Order in which the remaining tables are tried when the preferred one has no
+# data for a chunk. Historical years usually exist only in the "1 hour
+# validated" table, so it comes before "original". Without this fallback the
+# table for each station-era has to be chosen by hand, which silently yields
+# "no data" for a whole station when the guess is wrong (that is exactly how
+# TERA lost 2001-2005 and MXCO all of 2010 on the first backfill attempt).
+FALLBACK_ORDER = ("revori", "1h", "ori")
+
+
+def table_attempt_order(station: str, requested: str | None = None) -> list[str]:
+    """Tables to try for one chunk: the preferred one first, then the rest."""
+    primary = effective_table_choice(station, requested)
+    return [primary, *(t for t in FALLBACK_ORDER if t != primary)]
+
+
 def build_url(
     station: str,
     start: dt.date,
@@ -302,6 +317,45 @@ def fetch(url: str, timeout: int) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def request_chunk(
+    station: str,
+    start: dt.date,
+    end: dt.date,
+    table: str,
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, str], int]:
+    """Fetch and validate one chunk using exactly one NMDB table.
+
+    Returns ``(text, summary, rows)``. Raises ``NMDBNoData`` when NEST has
+    nothing for that table, and ``NMDBError`` when the response is present but
+    does not pass validation (e.g. NEST silently substituted another table, or
+    averaged a "best" request).
+    """
+    url = build_url(
+        station,
+        start,
+        end,
+        resolution=args.resolution,
+        table=table,
+        display_null=args.display_null,
+    )
+    for attempt in range(args.retries + 1):
+        try:
+            text = fetch(url, args.timeout)
+            break
+        except NMDBRequestError as exc:
+            if attempt >= args.retries:
+                raise
+            delay = args.retry_delay * (2**attempt)
+            print(
+                f"  transport failure: {exc}; retry "
+                f"{attempt + 1}/{args.retries} in {delay:g}s"
+            )
+            time.sleep(delay)
+    summary, rows = validate_response(text, station, args.resolution, table)
+    return text, summary, rows
+
+
 def build_ssl_context() -> ssl.SSLContext:
     """Build a verified TLS context, including common macOS CA locations."""
     candidates: list[Path] = []
@@ -337,6 +391,23 @@ def output_name(
 ) -> str:
     suffix = "best" if resolution == "best" else f"{resolution}min"
     return f"{station}_{start:%Y%m%d}_{end:%Y%m%d}_{suffix}.txt"
+
+
+def chunk_path(
+    output_dir: Path, station: str, start: dt.date, end: dt.date, resolution: str
+) -> Path:
+    """Where one downloaded chunk is stored.
+
+    Layout convention -- one subdirectory per station, so inspecting a station
+    does not mean wading through every other station's files::
+
+        <output_dir>/<STATION>/<STATION>_<start>_<end>_<suffix>.txt
+
+    The file name keeps its station prefix because readers parse it. Both
+    ``audit_nmdb`` and ``nmdb_filter_iqr`` walk the tree recursively, so a flat
+    directory written by an older run is still read correctly.
+    """
+    return output_dir / station / output_name(station, start, end, resolution)
 
 
 def no_data_name(path: Path) -> Path:
@@ -577,8 +648,8 @@ def main() -> int:
 
     if not args.download:
         for index, (station, start, end) in enumerate(tasks, start=1):
-            path = args.output_dir / output_name(
-                station, start, end, args.resolution
+            path = chunk_path(
+                args.output_dir, station, start, end, args.resolution
             )
             print(f"[{index}/{len(tasks)}] {station} {start} to {end} -> {path}")
         print("Dry run only. Add --download to retrieve data.")
@@ -590,7 +661,7 @@ def main() -> int:
     no_data = 0
     skipped = 0
     for index, (station, start, end) in enumerate(tasks, start=1):
-        path = args.output_dir / output_name(station, start, end, args.resolution)
+        path = chunk_path(args.output_dir, station, start, end, args.resolution)
         marker = no_data_name(path)
         if path.exists() and not args.overwrite:
             try:
@@ -633,58 +704,51 @@ def main() -> int:
                 "no-data marker belongs to a different NMDB table"
             )
 
-        url = build_url(
-            station,
-            start,
-            end,
-            resolution=args.resolution,
-            table=args.table,
-            display_null=args.display_null,
-        )
+        attempts = table_attempt_order(station, args.table)
         print(
             f"[{index}/{len(tasks)}] download {station} {start} to {end} "
-            f"[{effective_table_name(station, args.table)}]"
+            f"[{effective_table_name(station, attempts[0])}]"
         )
-        try:
-            for attempt in range(args.retries + 1):
-                try:
-                    text = fetch(url, args.timeout)
-                    break
-                except NMDBRequestError as exc:
-                    if attempt >= args.retries:
-                        raise
-                    delay = args.retry_delay * (2**attempt)
-                    print(
-                        f"  transport failure: {exc}; retry "
-                        f"{attempt + 1}/{args.retries} in {delay:g}s"
-                    )
-                    time.sleep(delay)
-            summary, rows = validate_response(
-                text, station, args.resolution, args.table
-            )
+        # Try the preferred table first, then the others: a table that is empty
+        # for a chunk means "no data in that table", not "no data at all".
+        outcome: str | None = None
+        for table in attempts:
+            if table != attempts[0]:
+                print(
+                    f"  no data in {effective_table_name(station, attempts[0])}; "
+                    f"trying {effective_table_name(station, table)}"
+                )
+            try:
+                text, summary, rows = request_chunk(
+                    station, start, end, table, args
+                )
+            except NMDBNoData:
+                continue
+            except (NMDBError, OSError, UnicodeError) as exc:
+                print(f"  FAILED: {exc}", file=sys.stderr)
+                failures += 1
+                outcome = "failed"
+                break
             if marker.exists():
                 marker.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
             write_atomic(path, text)
             print(
                 f"  saved {path.name}: {rows} rows; "
+                f"table={summary.get('NMDB TABLE')}; "
                 f"original={summary.get('ORIGINAL RES')}; "
                 f"averaging={summary.get('AVERAGING')}"
             )
             downloaded += 1
-        except NMDBNoData as exc:
+            outcome = "downloaded"
+            break
+        if outcome is None:
             # No marker file is written: an empty chunk is only reported (and
             # counted), so a re-run simply asks NEST again instead of leaving
-            # ``.no_data`` files in the output directory. Reading legacy markers
-            # is still supported below, so pre-existing ones keep acting as a
-            # cache.
-            print(
-                f"  no data: {station} {start} to {end} "
-                f"[{effective_table_name(station, args.table)}] ({exc})"
-            )
+            # ``.no_data`` files in the output directory.
+            tried = ", ".join(effective_table_name(station, t) for t in attempts)
+            print(f"  no data: {station} {start} to {end} (tried {tried})")
             no_data += 1
-        except (NMDBError, OSError, UnicodeError) as exc:
-            print(f"  FAILED: {exc}", file=sys.stderr)
-            failures += 1
         if index < len(tasks):
             time.sleep(args.sleep)
 
