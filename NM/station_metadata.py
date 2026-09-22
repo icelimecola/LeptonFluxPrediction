@@ -34,6 +34,7 @@ NMDB_TABLE_CHOICE: dict[str, str] = {
     "PSNM": "1h",
 }
 NMDB_TABLE_NAME = {
+    "ori": "original",
     "revori": "revised original",
     "1h": "1 hour validated",
 }
