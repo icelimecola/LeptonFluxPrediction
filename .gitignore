@@ -17,4 +17,5 @@
 **/__pycache__
 **/user
 **/logs
+**/.cache
 
