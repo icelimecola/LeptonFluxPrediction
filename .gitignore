@@ -12,6 +12,7 @@
 **/*.exe
 **/.omc
 **/rawdata
+**/data
 **/sun_processed
 **/__pycache__
 **/user
