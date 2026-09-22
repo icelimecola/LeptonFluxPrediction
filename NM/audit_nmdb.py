@@ -10,6 +10,7 @@ import json
 import math
 import re
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -121,13 +122,56 @@ def infer_resolution_minutes(step_counts: Counter[int]) -> int | None:
     return nominal_seconds // 60
 
 
+def merge_duplicate_timestamps(
+    rows: Iterable[tuple[dt.datetime, float | None]],
+) -> Iterator[tuple[dt.datetime, float | None]]:
+    """Merge adjacent rows that share a timestamp (an NMDB archive artefact).
+
+    Some archived chunks repeat a small number of rows: two consecutive lines
+    carry the same timestamp, and in almost every case the same value as well.
+    The repeats are always adjacent -- verified over the whole archive, the
+    largest gap between two occurrences of one timestamp is a single line -- so
+    this only ever looks back one row and runs in O(1) memory.
+
+    Merge rule: average the non-null values of the group. That is an identity
+    for the identical-value repeats (108 of the 111 occurrences currently in the
+    archive) and the least-squares compromise for the three genuinely differing
+    ones; a group whose values are all null stays ``None``.
+    """
+    pending: tuple[dt.datetime, float | None] | None = None
+    total = 0.0
+    count = 0
+    for timestamp, value in rows:
+        if pending is not None and timestamp == pending[0]:
+            if value is not None:
+                total += value
+                count += 1
+            continue
+        if pending is not None:
+            yield pending[0], (total / count if count else None)
+        pending = (timestamp, value)
+        total = value if value is not None else 0.0
+        count = 1 if value is not None else 0
+    if pending is not None:
+        yield pending[0], (total / count if count else None)
+
+
 def scan_data_file(
     path: Path,
     station: str,
     requested_start: dt.date,
     requested_end: dt.date,
     requested_resolution: str,
+    strict_chunks: bool = False,
 ) -> FileAudit:
+    """Audit one downloaded chunk.
+
+    A file whose NMDB table differs from the station's default one is accepted
+    with a note rather than rejected: an early year of a station may live only
+    in another table (see the table fallback in ``nmdb_download``), which is
+    provenance, not a data defect. The table actually used is kept in
+    ``FileAudit.nmdb_table`` and summarised per station downstream.
+    """
     summary: dict[str, str] = {}
     rows = 0
     valid_values = 0
@@ -211,12 +255,19 @@ def scan_data_file(
         issues.append(f"header station={header_station or '<missing>'}")
         fatal = True
     expected_table = nmdb_table_name(station)
-    if summary.get("NMDB TABLE", "").lower() != expected_table.lower():
+    actual_table = summary.get("NMDB TABLE", "")
+    if actual_table.lower() != expected_table.lower():
+        # Recorded, not fatal. An early year of a station may legitimately live
+        # in a different NMDB table than its modern era (JUNG/JUNG1 up to
+        # 2008Q3, INVK and THUL in 2001, PSNM throughout, and -- via the
+        # downloader's automatic table fallback -- TERA 2001-2005 and MXCO
+        # 2010), so a table mismatch is provenance, not a data defect. The table
+        # actually used stays in FileAudit.nmdb_table and is summarised per
+        # station by nmdb_filter_iqr, keeping unintended mixing visible.
         issues.append(
-            f"table={summary.get('NMDB TABLE', '<missing>')}, "
-            f"expected={expected_table}"
+            f"table={actual_table or '<missing>'}, "
+            f"station default={expected_table}"
         )
-        fatal = True
     if "corr_for_efficiency" not in summary.get("DATA TYPE", "").lower():
         issues.append(f"data type={summary.get('DATA TYPE', '<missing>')}")
         fatal = True
@@ -251,18 +302,47 @@ def scan_data_file(
 
     header_start = parse_header_datetime(summary.get("START TIME", ""))
     header_end = parse_header_datetime(summary.get("END TIME", ""))
-    if header_start is None or header_start.date() != requested_start:
-        issues.append("header start does not match filename")
+    if strict_chunks:
+        # legacy behaviour: the file must cover exactly the requested chunk
+        if header_start is None or header_start.date() != requested_start:
+            issues.append("header start does not match filename")
+            fatal = True
+        if header_end is None or header_end.date() != requested_end:
+            issues.append("header end does not match filename")
+            fatal = True
+    elif header_start is None or header_end is None or header_start > header_end:
+        issues.append("header range is missing or inverted")
         fatal = True
-    if header_end is None or header_end.date() != requested_end:
-        issues.append("header end does not match filename")
+    elif (
+        header_end.date() < requested_start
+        or header_start.date() > requested_end
+    ):
+        # the response covers a completely different interval -> wrong query
+        issues.append("header range does not overlap the requested chunk")
         fatal = True
+    else:
+        # the response may legitimately be shorter than requested when the
+        # station simply has no data at the chunk edges: keep it, warn only.
+        if header_start.date() > requested_start:
+            issues.append(
+                f"partial coverage: starts {header_start.date()} "
+                f"(requested {requested_start})"
+            )
+        if header_end.date() < requested_end:
+            issues.append(
+                f"partial coverage: ends {header_end.date()} "
+                f"(requested {requested_end})"
+            )
     if malformed_rows:
         issues.append(f"malformed rows={malformed_rows}")
         fatal = True
     if duplicate_timestamps:
         issues.append(f"duplicate timestamps={duplicate_timestamps}")
-        fatal = True
+        # NOT fatal: NMDB's archive genuinely contains repeated rows for some
+        # stations (reproducible by querying NEST directly, so a re-download
+        # cannot fix it). The rows are merged when read -- see
+        # merge_duplicate_timestamps -- and the count stays visible here and in
+        # FileAudit.duplicate_timestamps.
     if nonmonotonic_timestamps:
         issues.append(f"nonmonotonic timestamps={nonmonotonic_timestamps}")
         fatal = True
@@ -433,10 +513,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Audit NMDB files, values, timestamps, and monthly coverage."
     )
     parser.add_argument(
-        "--input-dir", type=Path, default=base / "rawdata" / "nmdb_best"
+        "--input-dir", type=Path, default=base / "data" / "nmdb_best"
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=base / "rawdata" / "nmdb_audit"
+        "--output-dir", type=Path, default=base / "data" / "nmdb_audit"
     )
     parser.add_argument(
         "--stations",
@@ -463,6 +543,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="return a nonzero status if any month is missing, partial, or invalid",
     )
+    parser.add_argument(
+        "--strict-chunks",
+        action="store_true",
+        help=(
+            "legacy mode: require each file to cover the requested chunk "
+            "exactly; by default a response that is merely shorter (the "
+            "station has no data at the edges) is accepted with a warning"
+        ),
+    )
     return parser
 
 
@@ -484,9 +573,11 @@ def main() -> int:
     if not args.input_dir.is_dir():
         raise SystemExit(f"input directory does not exist: {args.input_dir}")
 
+    # Walk recursively: downloads are stored one subdirectory per station, but a
+    # flat directory from an older run is still accepted.
     candidates = sorted(
         path
-        for path in args.input_dir.iterdir()
+        for path in args.input_dir.rglob("*")
         if path.is_file() and (path.name.endswith(".txt") or path.name.endswith(".no_data"))
     )
     audits: list[FileAudit] = []
@@ -504,7 +595,8 @@ def main() -> int:
             )
         else:
             audit = scan_data_file(
-                path, station, requested_start, requested_end, resolution
+                path, station, requested_start, requested_end, resolution,
+                strict_chunks=args.strict_chunks,
             )
         audits.append(audit)
         print(
