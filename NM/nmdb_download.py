@@ -551,7 +551,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="default: rawdata/nmdb_best or rawdata/nmdb_<minutes>min",
+        help="default: data/nmdb_best or data/nmdb_<minutes>min",
     )
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument(
@@ -622,7 +622,7 @@ def main() -> int:
             if args.resolution == "best"
             else f"nmdb_{args.resolution}min"
         )
-        args.output_dir = Path(__file__).resolve().parent / "rawdata" / dirname
+        args.output_dir = Path(__file__).resolve().parent / "data" / dirname
 
     stations = select_stations(args)
     chunks = iter_chunks(args.start, args.end, args.chunk_months)

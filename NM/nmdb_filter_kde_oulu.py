@@ -704,12 +704,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=base / "rawdata" / "nmdb_daily_iqr" / "data",
+        default=base / "data" / "nmdb_daily_iqr" / "data",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=base / "rawdata" / "nmdb_filter_kde_oulu",
+        default=base / "data" / "nmdb_filter_kde_oulu",
     )
     parser.add_argument(
         "--stations",
