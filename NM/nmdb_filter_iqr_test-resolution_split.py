@@ -73,20 +73,27 @@ import csv
 import datetime as dt
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from audit_nmdb import parse_filename, scan_data_file
 from nmdb_download import parse_date, parse_stations
 from nmdb_filter_iqr import (
-    DailyAccumulator,
+    DISPLAY_POINTS,
+    HOURLY_REJECTED_COLOR,
+    HOURLY_SAMPLE_COLOR,
+    HOURLY_TABLE,
+    MAX_REJECTED_STORED,
     VALUE_BLOCK_FLUSH,
-    discover_station_sources,
+    DailyAccumulator,
+    SourceFile,
+    audit_station_sources,
+    group_meta,
+    group_of,
+    group_spans,
     iqr_limits,
     iter_merged_rows,
-    validate_nonoverlap,
+    spec_of,
     write_daily_csv,
 )
 
@@ -108,109 +115,11 @@ DEFAULT_END = dt.date(2026, 6, 30)
 # days (OULU, FSMT): there the band is pooled over one resolution only, so A and
 # B must come out bit-identical. AATB can no longer serve as that control.
 DEFAULT_TEST_STATIONS = ["JUNG", "JUNG1", "INVK", "THUL", "MXCO", "AATB"]
-DISPLAY_POINTS = 150_000      # cap for the grey background cloud
-MAX_REJECTED_STORED = 400_000  # safety cap on the red crosses
-# NMDB table whose samples are drawn in green, so the days filled from the
-# hourly companion are visually separable from the minute-resolution revori ones.
-HOURLY_TABLE = "1 hour validated"
-HOURLY_SAMPLE_COLOR = "C2"           # raw 1h samples in the background cloud
-HOURLY_REJECTED_COLOR = "darkgreen"  # 1h samples dropped by the IQR band
 
 
 # --------------------------------------------------------------------------- #
 # collection
 # --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class SourceFile:
-    """One audited chunk: window, resolution group, table and raw header."""
-
-    start: dt.date
-    end: dt.date
-    group: str
-    table: str
-    raw_header: str
-
-
-def load_sources(
-    input_dirs: Sequence[Path],
-    station: str,
-    start: dt.date,
-    end: dt.date,
-) -> tuple[list[list[Path]], list[list[SourceFile]], list[dict[str, str]]]:
-    """Audit the priority-ordered input directories.
-
-    Mirrors ``nmdb_filter_iqr.process_station``: ``input_dirs[0]`` is the
-    preferred table and every later directory supplies only the whole days the
-    earlier ones are missing. Returns ``(usable_sources, specs, skipped)``,
-    where ``specs`` has one entry per level, parallel to ``usable_sources``.
-
-    The grouping key is the audit's normalised ``effective_resolution_minutes``,
-    NOT the raw ``ORIGINAL RES`` header string. The header is unreliable for
-    grouping: AATB writes ``multiple: min = 0 min, max = 1 min`` on some files
-    whose sampling is in fact a uniform 60 s, which would otherwise create
-    spurious resolution groups. The raw header is kept for reporting only.
-    """
-    sources = discover_station_sources(input_dirs, station, start, end)
-    usable_sources: list[list[Path]] = []
-    specs: list[list[SourceFile]] = []
-    skipped: list[dict[str, str]] = []
-    for paths in sources:
-        usable: list[Path] = []
-        level_specs: list[SourceFile] = []
-        for path in paths:
-            parsed = parse_filename(path)
-            assert parsed is not None
-            _, file_start, file_end, resolution, _ = parsed
-            audit = scan_data_file(path, station, file_start, file_end, resolution)
-            if audit.status == "invalid":
-                skipped.append({"path": str(path), "reason": audit.issues})
-                continue
-            usable.append(path)
-            level_specs.append(
-                SourceFile(
-                    start=file_start,
-                    end=file_end,
-                    group=f"{audit.effective_resolution_minutes} min",
-                    table=audit.nmdb_table.strip(),
-                    raw_header=audit.original_resolution.strip() or "unknown",
-                )
-            )
-        validate_nonoverlap(usable)
-        if usable:
-            usable_sources.append(usable)
-            specs.append(level_specs)
-    return usable_sources, specs, skipped
-
-
-def spec_of(
-    specs: Sequence[Sequence[SourceFile]], level: int, day: dt.date
-) -> SourceFile | None:
-    """The audited chunk that served ``day`` at ``level``.
-
-    Chunks inside one level never overlap, so a binary search over the sorted
-    windows is enough.
-    """
-    windows = specs[level]
-    lo, hi = 0, len(windows) - 1
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        spec = windows[mid]
-        if day < spec.start:
-            hi = mid - 1
-        elif day > spec.end:
-            lo = mid + 1
-        else:
-            return spec
-    return None
-
-
-def group_of(
-    specs: Sequence[Sequence[SourceFile]], level: int, day: dt.date
-) -> str | None:
-    """Resolution group that served ``day`` at ``level``."""
-    spec = spec_of(specs, level, day)
-    return spec.group if spec is not None else None
-
 
 def group_values(
     usable_sources: Sequence[Sequence[Path]],
@@ -237,35 +146,6 @@ def group_values(
             blocks[group].append(np.asarray(pending, dtype=np.float64))
     return {group: np.concatenate(parts) for group, parts in blocks.items()}
 
-
-def group_spans(
-    specs: Sequence[Sequence[SourceFile]],
-) -> dict[str, tuple[dt.date, dt.date]]:
-    spans: dict[str, list[dt.date]] = collections.defaultdict(list)
-    for level_specs in specs:
-        for spec in level_specs:
-            spans[spec.group].extend([spec.start, spec.end])
-    return {group: (min(v), max(v)) for group, v in spans.items()}
-
-
-def group_meta(
-    specs: Sequence[Sequence[SourceFile]],
-) -> dict[str, dict[str, list[str]]]:
-    """Raw headers and NMDB tables that fed each resolution group."""
-    meta: dict[str, dict[str, list[str]]] = {}
-    for level_specs in specs:
-        for spec in level_specs:
-            entry = meta.setdefault(
-                spec.group, {"raw_headers": [], "nmdb_tables": []}
-            )
-            if spec.raw_header not in entry["raw_headers"]:
-                entry["raw_headers"].append(spec.raw_header)
-            if spec.table not in entry["nmdb_tables"]:
-                entry["nmdb_tables"].append(spec.table)
-    return {
-        group: {key: sorted(values) for key, values in entry.items()}
-        for group, entry in meta.items()
-    }
 
 
 def accumulate_both(
@@ -667,7 +547,7 @@ def main() -> int:
     reports: list[dict[str, object]] = []
     for index, station in enumerate(args.stations, start=1):
         print(f"[{index}/{len(args.stations)}] {station}", flush=True)
-        usable_sources, specs, skipped = load_sources(
+        usable_sources, specs, _audits, skipped = audit_station_sources(
             args.input_dir, station, args.start, args.end
         )
         if not usable_sources:
