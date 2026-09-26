@@ -9,7 +9,8 @@ mirroring the reference implementation:
 
 Flow:
   * MinMaxScaler normalization (fit on finite values);
-  * optional MCAR-30% evaluation on a 70/15/15 split (prints SAITS MAE);
+  * optional MCAR-30% evaluation on a 70/15/15 split (prints SAITS MAE over all
+    test windows, scored on the artificially masked cells only);
   * full-matrix imputation by averaging overlapping 365-day window predictions;
   * inverse transform back to counts/s.
 
@@ -17,6 +18,14 @@ Outputs under OUTPUT_DIR:
   * nm_daily_imputed_counts.csv     (date x station, complete, counts/s)
   * nm_daily_imputed_counts.npy     (T x D numpy matrix, counts/s)
   * plots/imputed/<STATION>_imputed.pdf (per-station series; imputed '+' blue)
+  * model/<timestamp>/SAITS.pypots  (best-epoch model weights + tensorboard
+                                      log, written by PyPOTS; skip with
+                                      --no-save-model)
+
+Early stopping: ``--patience N`` stops training once the validation loss has
+not improved for N consecutive epochs (default: off, i.e. run all --epochs).
+Whether or not it triggers, PyPOTS restores the best-validation epoch before
+imputing, and that epoch is recorded as ``best_epoch`` in the summary.
 """
 
 from __future__ import annotations
@@ -141,7 +150,13 @@ def _load_pypots():
     return SAITS, calc_mae
 
 
-def make_model(window: int, n_features: int, epochs: int):
+def make_model(
+    window: int,
+    n_features: int,
+    epochs: int,
+    patience: int | None = None,
+    saving_path: Path | None = None,
+):
     SAITS, _ = _load_pypots()
     return SAITS(
         n_steps=window,
@@ -154,6 +169,12 @@ def make_model(window: int, n_features: int, epochs: int):
         d_ffn=128,
         dropout=0.1,
         epochs=epochs,
+        # early stopping: None keeps the old behaviour (run every epoch)
+        patience=patience,
+        # PyPOTS writes the best model (+ a tensorboard log) under this
+        # directory in a timestamped sub-folder; None disables saving
+        saving_path=str(saving_path) if saving_path is not None else None,
+        model_saving_strategy="best",
     )
 
 
@@ -168,8 +189,14 @@ class _LossLoggerHandler(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
         self.records: list[tuple[int, float, float | None]] = []
+        # epoch PyPOTS restored at the end ("The best model is from epoch#N")
+        self.best_epoch: int | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
+        best = re.search(r"best model is from epoch#(\d+)", record.getMessage())
+        if best is not None:
+            self.best_epoch = int(best.group(1))
+            return
         if "Epoch" not in record.getMessage() or "training loss" not in record.getMessage():
             return
         text = record.getMessage()
@@ -234,7 +261,15 @@ def train_and_evaluate(
     seed: int,
     n_features: int,
     do_eval: bool,
-) -> tuple[object, float | None, list[tuple[int, float, float | None]]]:
+    patience: int | None = None,
+    saving_path: Path | None = None,
+) -> tuple[
+    object,
+    float | None,
+    list[tuple[int, float, float | None]],
+    dict[str, int] | None,
+    int | None,
+]:
     SAITS, calc_mae = _load_pypots()
     from pypots.utils.logging import logger as pypots_logger
 
@@ -260,28 +295,36 @@ def train_and_evaluate(
         test_w = sliding_windows(test_masked, window)
         test_ori_w = sliding_windows(test_ori, window)
 
-        model = make_model(window, n_features, epochs)
+        model = make_model(window, n_features, epochs, patience, saving_path)
         try:
             model.fit({"X": train_w}, {"X": val_w, "X_ori": val_ori_w})
         finally:
             pypots_logger.removeHandler(handler)
 
-        test_input = test_w[0][np.newaxis, ...]       # (1, window, D)
-        test_ground = test_ori_w[0][np.newaxis, ...]
-        imputed = model.impute({"X": test_input})
-        mask = np.isnan(test_input) ^ np.isnan(test_ground)
-        mae = float(calc_mae(imputed, np.nan_to_num(test_ground), mask))
-        return model, mae, handler.records
+        # Test MAE uses *all* test windows at once, matching the reference
+        # implementation (FluxPrediction/neutron/process_neutron12_impute.py).
+        # Only artificially masked cells are scored; cells that were already
+        # missing have no ground truth and drop out of the XOR mask.
+        # Because the windows overlap, a cell in the middle of the split is
+        # counted `window` times while edge cells are counted less often, so
+        # this is a window-weighted mean rather than a per-cell mean.
+        mask = np.isnan(test_w) ^ np.isnan(test_ori_w)  # (N, window, D)
+        imputed = model.impute({"X": test_w})           # (N, window, D)
+        mae = float(calc_mae(imputed, np.nan_to_num(test_ori_w), mask))
+        return model, mae, handler.records, {
+            "train_end": n_train,
+            "val_end": n_train + n_val,
+        }, handler.best_epoch
 
     # No evaluation: train on the full-window set so the model can impute later.
     # No ground truth exists here, so pass no validation set.
     windows = sliding_windows(scaled, window)
-    model = make_model(window, n_features, epochs)
+    model = make_model(window, n_features, epochs, patience, saving_path)
     try:
         model.fit({"X": windows})
     finally:
         pypots_logger.removeHandler(handler)
-    return model, None, handler.records
+    return model, None, handler.records, None, handler.best_epoch
 
 
 def impute_full(scaled: np.ndarray, window: int, model) -> np.ndarray:
@@ -308,6 +351,7 @@ def plot_imputed(
     station_index: int,
     original: np.ndarray,
     imputed: np.ndarray,
+    split_dates=None,
 ) -> Path:
     import matplotlib
 
@@ -336,6 +380,12 @@ def plot_imputed(
             color="#1a73e8", markeredgewidth=0.8, label="Imputed",
         )
     axis.set_xlim(dates[0], dates[-1])
+    if split_dates:
+        for boundary, label in zip(split_dates, ("train|val", "val|test")):
+            axis.axvline(
+                boundary, color="0.3", linestyle=":", linewidth=1.0,
+                alpha=0.7, zorder=0, label=label,
+            )
     axis.set_xlabel("Year")
     axis.set_ylabel("Count rate (counts/s)")
     axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=9))
@@ -362,6 +412,7 @@ def draw_imputed_panel(
     mdates,
     *,
     combined: bool,
+    split_dates=None,
 ) -> None:
     """Draw one panel of the imputed daily series (gray observed + blue '')."""
     values = imputed[:, station_index]
@@ -389,6 +440,12 @@ def draw_imputed_panel(
             label="Imputed" if not combined else None,
         )
     axis.set_xlim(dates[0], dates[-1])
+    if split_dates:
+        for boundary in split_dates:
+            axis.axvline(
+                boundary, color="0.3", linestyle=":", linewidth=1.0,
+                alpha=0.7, zorder=0,
+            )
     axis.set_xlabel("Year")
     axis.set_ylabel("Count rate (counts/s)")
     axis.xaxis.set_major_locator(
@@ -418,6 +475,7 @@ def write_combined_imputed(
     stations,
     original: np.ndarray,
     imputed: np.ndarray,
+    split_dates=None,
 ) -> list[str]:
     """Write combined 3x2 group PDFs of the imputed series (6 stations/group)."""
     import matplotlib
@@ -446,6 +504,7 @@ def write_combined_imputed(
                 imputed,
                 mdates,
                 combined=True,
+                split_dates=split_dates,
             )
         for row in range(3):
             for column in range(2):
@@ -477,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--input",
         type=Path,
         default=(
-            base / "rawdata" / "nmdb_filter_kde_oulu" / "data"
+            base / "data" / "nmdb_filter_kde_oulu" / "data"
             / "nm_daily_oulu_filtered_counts.npy"
         ),
         help=(
@@ -487,19 +546,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--start-date",
-        default="2011-01-01",
+        default="2001-01-01",
         help=(
-            "first date of the consecutive daily grid used to label rows "
-            "when reading a bare .npy/.npz matrix (default: 2011-01-01)"
+            "first date of the consecutive daily grid used to label rows when "
+            "reading a bare .npy/.npz matrix, which carries no dates of its own. "
+            "The KDE matrix now starts at 2001-01-01; a stale value here does not "
+            "fail loudly, it shifts every output date by the difference, so keep "
+            "it in step with the range the chain was run over (default: 2001-01-01)"
         ),
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=base / "rawdata" / "nmdb_imputed",
+        "--output-dir", type=Path, default=base / "data" / "nmdb_imputed",
     )
     parser.add_argument("--window", type=int, default=365)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--mask-rate", type=float, default=0.3)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=None,
+        help=(
+            "early stopping: stop after this many epochs without a better "
+            "validation loss (default: off, run all --epochs). With "
+            "--skip-eval there is no validation set, so PyPOTS monitors the "
+            "training loss instead"
+        ),
+    )
+    parser.add_argument(
+        "--no-save-model",
+        action="store_true",
+        help="do not save the trained model under OUTPUT_DIR/model",
+    )
     parser.add_argument(
         "--skip-eval", action="store_true", help="skip the MCAR-30%% MAE check"
     )
@@ -523,6 +601,8 @@ def main() -> int:
         raise SystemExit("--window must be at least 2")
     if not 0 < args.mask_rate < 1:
         raise SystemExit("--mask-rate must be between 0 and 1")
+    if args.patience is not None and args.patience < 1:
+        raise SystemExit("--patience must be a positive integer")
     if not args.input.is_file():
         raise SystemExit(f"input file does not exist: {args.input}")
 
@@ -566,7 +646,8 @@ def main() -> int:
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(data)
 
-    model, mae, loss_history = train_and_evaluate(
+    model_dir = None if args.no_save_model else args.output_dir / "model"
+    model, mae, loss_history, split_index, best_epoch = train_and_evaluate(
         scaled,
         args.window,
         args.epochs,
@@ -574,9 +655,39 @@ def main() -> int:
         args.seed,
         data.shape[1],
         do_eval=not args.skip_eval,
+        patience=args.patience,
+        saving_path=model_dir,
     )
+    epochs_run = loss_history[-1][0] if loss_history else None
+    if best_epoch is not None:
+        stopped = (
+            f", stopped early at epoch {epochs_run}"
+            if epochs_run is not None and epochs_run < args.epochs
+            else ""
+        )
+        print(f"best epoch (restored before imputing): {best_epoch}{stopped}")
+    saved_models = (
+        sorted(str(path) for path in model_dir.rglob("*.pypots"))
+        if model_dir is not None and model_dir.is_dir()
+        else []
+    )
+    if model_dir is not None:
+        print(f"saved model: {saved_models[-1] if saved_models else '(none found)'}")
+    # vertical split lines for the per-station plots (train|val, val|test)
+    split_dates = None
+    if split_index:
+        split_dates = (
+            dates[split_index["train_end"]],
+            dates[split_index["val_end"]],
+        )
+        print(
+            f"split boundaries: train|val {split_dates[0]}, "
+            f"val|test {split_dates[1]}"
+        )
     if mae is not None:
-        print(f"SAITS MAE (MCAR {args.mask_rate:.0%}): {mae:.6f}")
+        print(
+            f"SAITS MAE (MCAR {args.mask_rate:.0%}, all test windows): {mae:.6f}"
+        )
     if loss_history:
         first_epoch = loss_history[0][0]
         last_epoch = loss_history[-1][0]
@@ -601,11 +712,15 @@ def main() -> int:
         imputed_dir = plots_root / "imputed"
         for index, station in enumerate(stations):
             output_plots.append(
-                str(plot_imputed(imputed_dir, dates, station, index, data, imputed))
+                str(plot_imputed(
+                    imputed_dir, dates, station, index, data, imputed,
+                    split_dates=split_dates,
+                ))
             )
         output_plots.extend(
             write_combined_imputed(
-                plots_root, dates, stations, data, imputed
+                plots_root, dates, stations, data, imputed,
+                split_dates=split_dates,
             )
         )
         if loss_history:
@@ -619,8 +734,16 @@ def main() -> int:
         "stations": stations,
         "n_stations": len(stations),
         "requested_stations": args.stations,
+        "split_day_counts": split_index,
+        "split_boundary_dates": (
+            [day.isoformat() for day in split_dates] if split_dates else None
+        ),
         "window": args.window,
         "epochs": args.epochs,
+        "patience": args.patience,
+        "epochs_run": epochs_run,
+        "best_epoch": best_epoch,
+        "saved_model": saved_models[-1] if saved_models else None,
         "mask_rate": args.mask_rate,
         "seed": args.seed,
         "mae": mae,
