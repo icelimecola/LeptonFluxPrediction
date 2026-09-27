@@ -29,6 +29,18 @@ with k = [min(7, N), min(5, N), min(3, N)].
 Training mirrors 小导: log10 target, MinMax scaling (fit on train only),
 random 80/10/10 split controlled by --data-seed, Adamax, MSE loss,
 early stopping on val_loss + keep the best-val weights.
+
+Keras-equivalence details (2026-09-27):
+  * L2: Keras ``L2(l2)`` on the Dense kernel adds ``l2 * sum(W**2)`` to the
+    loss (gradient ``2*l2*W``), leaves the bias alone, and is included in the
+    reported train/val/test loss. Reproduced here as an explicit penalty on
+    ``head.weight`` only, added to every reported loss, so early stopping
+    compares the same quantity as Keras' ``val_loss``.
+  * BatchNorm: Keras defaults momentum=0.99, epsilon=1e-3; PyTorch's momentum
+    is the complement, so ``BatchNorm1d(momentum=0.01, eps=1e-3)``.
+  * Dates: the neutron rows are dated from the ``date`` column of the CSV that
+    sits next to the .npy (written by nmdb_impute_saits.py). ``--neutron-start``
+    is only a fallback when no CSV is present; if both exist they must agree.
 """
 
 from __future__ import annotations
@@ -65,12 +77,53 @@ except Exception:  # pragma: no cover - fallback keeps the script self-contained
 # --------------------------------------------------------------------------
 # data loading / alignment (pure numpy; importable without torch)
 # --------------------------------------------------------------------------
-def read_neutron(path: Path, start_date: dt.date):
+def read_neutron_csv_dates(npy_path: Path) -> list[dt.date] | None:
+    """Dates from the ``date`` column of the CSV next to the .npy, if any."""
+    csv_path = npy_path.with_suffix(".csv")
+    if not csv_path.is_file():
+        return None
+    with csv_path.open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, None)
+        if not header or header[0].strip().lower() != "date":
+            return None
+        return [dt.date.fromisoformat(row[0].strip()) for row in reader if row]
+
+
+def read_neutron(path: Path, start_date: dt.date | None):
+    """Load the neutron matrix and date its rows.
+
+    The CSV date column is authoritative. ``start_date`` (--neutron-start) is
+    used only when there is no CSV; if both are available they must agree, so
+    a stale start date can never silently shift the whole series.
+    """
     data = np.load(path)
     data = np.asarray(data, dtype=np.float64)
     if data.ndim != 2:
         raise SystemExit(f"neutron matrix must be 2-D, got {data.shape}")
+    csv_dates = read_neutron_csv_dates(path)
+    if csv_dates is not None:
+        if len(csv_dates) != data.shape[0]:
+            raise SystemExit(
+                f"CSV next to {path.name} has {len(csv_dates)} dated rows but "
+                f"the matrix has {data.shape[0]}"
+            )
+        steps = {(b - a).days for a, b in zip(csv_dates, csv_dates[1:])}
+        if steps and steps != {1}:
+            raise SystemExit("neutron CSV dates are not a consecutive daily grid")
+        if start_date is not None and start_date != csv_dates[0]:
+            raise SystemExit(
+                f"--neutron-start {start_date} disagrees with the CSV, which "
+                f"starts at {csv_dates[0]}; drop --neutron-start or fix it"
+            )
+        print(f"neutron dates from CSV: {csv_dates[0]} .. {csv_dates[-1]}")
+        return data, csv_dates
+    if start_date is None:
+        raise SystemExit(
+            f"no dated CSV next to {path}; pass --neutron-start YYYY-MM-DD"
+        )
     dates = [start_date + dt.timedelta(days=i) for i in range(data.shape[0])]
+    print(f"neutron dates from --neutron-start: {dates[0]} .. {dates[-1]}")
     return data, dates
 
 
@@ -161,7 +214,7 @@ def build_model(n_stations: int, n_bins: int, dropout: float):
         for k in kernels:
             layers += [
                 nn.Conv1d(64, 64, k, padding="same"),
-                nn.BatchNorm1d(64),
+                nn.BatchNorm1d(64, momentum=0.01, eps=1e-3),  # Keras defaults
                 nn.ReLU(),
                 nn.Dropout(dropout),
             ]
@@ -184,7 +237,7 @@ def build_model(n_stations: int, n_bins: int, dropout: float):
             for k in kernels:
                 first += [
                     nn.Conv1d(1 if not first else 64, 64, k, padding="same"),
-                    nn.BatchNorm1d(64),
+                    nn.BatchNorm1d(64, momentum=0.01, eps=1e-3),  # Keras defaults
                     nn.ReLU(),
                     nn.Dropout(dropout),
                 ]
@@ -447,8 +500,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="SAITS-imputed NM daily matrix (T, n_stations), fully finite",
     )
     parser.add_argument(
-        "--neutron-start", default="2011-01-01",
-        help="date of the first row of the neutron matrix",
+        "--neutron-start", default=None,
+        help=(
+            "date of the first row of the neutron matrix; only needed when no "
+            "dated CSV sits next to --neutron (the CSV date column wins, and a "
+            "mismatch is an error)"
+        ),
     )
     parser.add_argument(
         "--proton", type=Path,
@@ -482,8 +539,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="torch device (default: cuda > mps > cpu)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=base / "data" / "n2p",
-        help="root for Model/ Figure/ Error/ outputs (default: NM/data/n2p)",
+        "--output-dir", type=Path, default=base / "data" / "nmdb_n2p",
+        help=(
+            "root for Model/ Figure/ Error/ outputs and n2p_summary.json "
+            "(default: NM/data/nmdb_n2p; the group jobs use "
+            "data/nmdb_n2p_<TAG>/seed<N>, one directory per run because the "
+            "summary file name is fixed)"
+        ),
     )
     parser.add_argument(
         "--quick", action="store_true",
@@ -527,7 +589,9 @@ def main() -> int:
         args.epochs = min(args.epochs, 500)
         args.output_dir = args.output_dir / "quick"
 
-    start_date = dt.date.fromisoformat(args.neutron_start)
+    start_date = (
+        dt.date.fromisoformat(args.neutron_start) if args.neutron_start else None
+    )
     neutron, neutron_dates = read_neutron(args.neutron, start_date)
     proton, proton_dates = read_proton(args.proton, args.proton_meta)
     rows = align_rows(neutron_dates, proton_dates)
@@ -584,18 +648,17 @@ def main() -> int:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"trainable parameters: {n_params:,}")
 
-    # L2 only on the output layer (mirrors L2 on the Keras Dense kernel)
-    head_params = list(model.head.parameters())
-    head_ids = {id(p) for p in head_params}
-    other_params = [p for p in model.parameters() if id(p) not in head_ids]
+    # L2 exactly as Keras L2(l2) on the Dense kernel: + l2 * sum(W**2) on the
+    # output weight only (not its bias), added to the loss itself. The optimizer
+    # therefore gets no weight_decay; the penalty is also included in the
+    # val/test loss, as Keras' val_loss does, so early stopping matches.
     optimizer = torch.optim.Adamax(
-        [
-            {"params": other_params, "weight_decay": 0.0},
-            {"params": head_params, "weight_decay": args.l2},
-        ],
-        lr=args.lr, betas=(0.9, 0.999), eps=1e-7,
+        model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-7,
     )
-    criterion = torch.nn.MSELoss()
+    mse = torch.nn.MSELoss()
+
+    def criterion(pred, target):
+        return mse(pred, target) + args.l2 * torch.sum(model.head.weight ** 2)
 
     X_train_t = torch.as_tensor(X_train, dtype=torch.float32)
     y_train_t = torch.as_tensor(y_train_s, dtype=torch.float32)
