@@ -194,6 +194,18 @@ def select_station_indices(station_names, requested) -> list[int]:
     return [i for i, name in enumerate(station_names) if name in wanted_set]
 
 
+# Wording of the plots. nmdb_n2p.py is proton / rigidity (GV); other scripts that
+# reuse the plotting helpers (e.g. nmdb_p2pos.py, positron / energy in GeV)
+# update this dict before plotting. Defaults leave the n2p figures unchanged.
+PLOT_LABELS = {"particle": "proton", "unit": "GV", "axis": "rigidity",
+               "err": "stat+syst"}
+
+
+def _flux_label() -> str:
+    unit = PLOT_LABELS["unit"]
+    return "flux (m$^{-2}$sr$^{-1}$s$^{-1}$" + unit + "$^{-1}$)"
+
+
 def adaptive_kernels(n_stations: int) -> list[int]:
     """Kernel sizes clipped to the number of stations (mirrors 7/5/3)."""
     kernels = sorted({min(7, n_stations), min(5, n_stations), min(3, n_stations)})
@@ -203,7 +215,7 @@ def adaptive_kernels(n_stations: int) -> list[int]:
 # --------------------------------------------------------------------------
 # model (PyTorch)
 # --------------------------------------------------------------------------
-def build_model(n_stations: int, n_bins: int, dropout: float):
+def build_model(n_stations: int, n_bins: int, dropout: float, init: str = "keras"):
     import torch
     import torch.nn as nn
 
@@ -253,6 +265,16 @@ def build_model(n_stations: int, n_bins: int, dropout: float):
             return self.head(x)
 
     model = N2PResidualNet()
+    if init == "keras":
+        # Keras defaults: glorot_uniform kernels, zero biases (Conv1D and Dense);
+        # BatchNorm gamma=1, beta=0 is already the same in both frameworks.
+        # PyTorch's own default (Kaiming-uniform) is kept with init="torch".
+        for module in model.modules():
+            if isinstance(module, (nn.Conv1d, nn.Linear)):
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
+    elif init != "torch":
+        raise ValueError(f"unknown init {init!r} (use 'keras' or 'torch')")
     return model, kernels
 
 
@@ -310,9 +332,9 @@ def make_plots(out_dir, train_losses, val_losses, test_losses, y_true, y_pred, b
     axis.plot([lo, hi], [lo, hi], color="0.3", linewidth=1.0, linestyle=":")
     axis.set_xscale("log")
     axis.set_yscale("log")
-    axis.set_xlabel("observed flux")
+    axis.set_xlabel("AMS Data flux")
     axis.set_ylabel("predicted flux")
-    axis.set_title("test: predicted vs observed")
+    axis.set_title("test: predicted vs AMS Data")
     figure.tight_layout()
     path = out_dir / "scatter_all_bins.pdf"
     figure.savefig(path, format="pdf", bbox_inches="tight")
@@ -325,7 +347,7 @@ def make_plots(out_dir, train_losses, val_losses, test_losses, y_true, y_pred, b
     rel_mean = np.nanmean(rel, axis=0)
     figure, axis = plt.subplots(figsize=(9.0, 4.0))
     axis.bar(range(1, len(rel_mean) + 1), rel_mean * 100.0, color="#26734d")
-    axis.set_xlabel("rigidity bin index")
+    axis.set_xlabel(f"{PLOT_LABELS['axis']} bin index")
     axis.set_ylabel("mean |relative error| (%)")
     axis.set_title("test: per-bin relative error")
     figure.tight_layout()
@@ -349,15 +371,15 @@ def make_plots(out_dir, train_losses, val_losses, test_losses, y_true, y_pred, b
             axis.plot([lo, hi], [lo, hi], color="0.3", linewidth=0.8, linestyle=":")
             axis.set_xscale("log")
             axis.set_yscale("log")
-            axis.set_xlabel("observed", fontsize=9)
+            axis.set_xlabel("AMS Data", fontsize=9)
             axis.set_ylabel("predicted", fontsize=9)
-            axis.set_title(f"bin {j + 1}: {bins[j][0]:g}-{bins[j][1]:g} GV",
+            axis.set_title(f"bin {j + 1}: {bins[j][0]:g}-{bins[j][1]:g} {PLOT_LABELS['unit']}",
                            fontsize=11, fontweight="bold")
             axis.tick_params(direction="in", top=True, right=True, labelsize=8)
         for index in range(len(group), 6):
             axes[index // 2, index % 2].set_visible(False)
         figure.suptitle(
-            "test: predicted vs observed (log-log)",
+            "test: predicted vs AMS Data (log-log)",
             fontsize=14, fontweight="bold",
         )
         figure.tight_layout(rect=(0, 0, 1, 0.95))
@@ -394,7 +416,10 @@ def make_timeseries_plots(
     prd = np.asarray([row[2] for row in records])
     split_of = np.asarray([row[3] for row in records])
 
-    colors = {"train": "C0", "val": "C1", "test": "C3"}
+    # observed (measured) flux is drawn in red so it stands out; the predicted
+    # test split therefore uses green instead of the old red
+    obs_color = "#d62728"
+    colors = {"train": "C0", "val": "C1", "test": "C2"}
     indiv_dir.mkdir(parents=True, exist_ok=True)
     combined_dir.mkdir(parents=True, exist_ok=True)
     paths: list[str] = []
@@ -403,7 +428,7 @@ def make_timeseries_plots(
     def style_axis(axis, combined):
         axis.set_yscale("log")
         axis.set_xlim(date_lo, date_hi)
-        axis.set_ylabel("flux (m$^{-2}$sr$^{-1}$s$^{-1}$GV$^{-1}$)",
+        axis.set_ylabel(_flux_label(),
                         fontsize=9 if combined else 10)
         axis.xaxis.set_major_locator(
             mdates.AutoDateLocator(minticks=4 if combined else 5,
@@ -415,7 +440,7 @@ def make_timeseries_plots(
 
     def bin_label(axis, j, combined):
         axis.text(
-            0.02, 0.94, f"bin {j + 1}: {bins[j][0]:g}-{bins[j][1]:g} GV",
+            0.02, 0.94, f"bin {j + 1}: {bins[j][0]:g}-{bins[j][1]:g} {PLOT_LABELS['unit']}",
             transform=axis.transAxes, ha="left", va="top",
             fontsize=11 if combined else 13, fontweight="bold",
         )
@@ -424,8 +449,8 @@ def make_timeseries_plots(
     for j in range(obs.shape[1]):
         figure, axis = plt.subplots(figsize=(11.0, 3.4))
         axis.plot(dates, obs[:, j], linestyle="none", marker=".",
-                  markersize=2.6, color="0.6", markeredgewidth=0, zorder=1,
-                  label="observed")
+                  markersize=2.6, color=obs_color, markeredgewidth=0, zorder=1,
+                  label="AMS Data")
         for label in ("train", "val", "test"):
             sel = split_of == label
             if not sel.any():
@@ -439,17 +464,17 @@ def make_timeseries_plots(
         style_axis(axis, combined=False)
         bin_label(axis, j, combined=False)
         axis.legend(
-            loc="upper left", bbox_to_anchor=(0.0, 0.86),
+            loc="upper left", bbox_to_anchor=(0.0, 0.88), borderaxespad=0.3,
             fontsize=9, frameon=False, markerscale=1.8, handlelength=1.2,
-            labelcolor=["0.3", "C0", "C1", "C3"],
+            labelcolor=[obs_color, "C0", "C1", "C2"],
         )
         figure.tight_layout()
-        path = indiv_dir / f"bin_{j + 1:02d}_{bins[j][0]:g}-{bins[j][1]:g}GV.pdf"
+        path = indiv_dir / f"bin_{j + 1:02d}_{bins[j][0]:g}-{bins[j][1]:g}{PLOT_LABELS['unit']}.pdf"
         figure.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(figure)
         paths.append(str(path))
 
-    # combined: simple and sparse, 6 bins per 3x2 figure, observed grey + predicted blue
+    # combined: simple and sparse, 6 bins per 3x2 figure, observed red + predicted blue
     n_bins = obs.shape[1]
     for group_start in range(0, n_bins, group_size):
         group = list(range(group_start, min(group_start + group_size, n_bins)))
@@ -458,22 +483,22 @@ def make_timeseries_plots(
         for index, j in enumerate(group):
             axis = axes[index // 2, index % 2]
             axis.plot(dates, obs[:, j], linestyle="none", marker=".",
-                      markersize=2.6, color="0.55", markeredgewidth=0, zorder=1,
-                      label="observed")
+                      markersize=2.6, color=obs_color, markeredgewidth=0, zorder=1,
+                      label="AMS Data")
             axis.plot(dates, prd[:, j], linestyle="none", marker=".",
                       markersize=2.4, color="#1a73e8", markeredgewidth=0, zorder=2,
                       label="predicted")
             style_axis(axis, combined=True)
             bin_label(axis, j, combined=True)
             axis.legend(
-                loc="upper left", bbox_to_anchor=(0.0, 0.86),
+                loc="upper left", bbox_to_anchor=(0.0, 0.90), borderaxespad=0.3,
                 fontsize=9, frameon=False, markerscale=2.2, handlelength=1.2,
-                labelcolor=["0.3", "#1a73e8"],
+                labelcolor=[obs_color, "#1a73e8"],
             )
         for index in range(len(group), group_size):
             axes[index // 2, index % 2].set_visible(False)
         figure.suptitle(
-            "proton flux: observed (grey) vs predicted (blue) "
+            f"{PLOT_LABELS['particle']} flux: AMS Data (red) vs predicted (blue) "
             f"(bins {group[0] + 1}-{group[-1] + 1})",
             fontsize=15, fontweight="bold",
         )
@@ -482,7 +507,210 @@ def make_timeseries_plots(
         figure.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(figure)
         paths.append(str(path))
+
+    # observed only: the measured AMS flux alone, same 6-bins-per-figure grouping
+    for group_start in range(0, n_bins, group_size):
+        group = list(range(group_start, min(group_start + group_size, n_bins)))
+        group_number = group_start // group_size + 1
+        figure, axes = plt.subplots(3, 2, figsize=(16.0, 11.0), squeeze=False)
+        for index, j in enumerate(group):
+            axis = axes[index // 2, index % 2]
+            axis.plot(dates, obs[:, j], linestyle="none", marker=".",
+                      markersize=2.6, color=obs_color, markeredgewidth=0)
+            style_axis(axis, combined=True)
+            bin_label(axis, j, combined=True)
+        for index in range(len(group), group_size):
+            axes[index // 2, index % 2].set_visible(False)
+        figure.suptitle(
+            f"AMS Data: {PLOT_LABELS['particle']} flux (bins {group[0] + 1}-{group[-1] + 1})",
+            fontsize=15, fontweight="bold",
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.95))
+        path = combined_dir / f"combined_observed_group_{group_number}.pdf"
+        figure.savefig(path, format="pdf", bbox_inches="tight")
+        plt.close(figure)
+        paths.append(str(path))
     return paths
+
+
+# --------------------------------------------------------------------------
+# test-set diagnostics in the style of 小导's draw scripts (test samples only)
+# --------------------------------------------------------------------------
+def read_proton_total_error(meta_path: Path, n_rows: int):
+    """AMS total error per (day, bin) = sqrt(stat^2 + syst^2), as 小导 uses.
+
+    Returns None when the meta file carries no error arrays.
+    """
+    with np.load(meta_path) as meta:
+        if not {"flux_err_statistical", "flux_err_systematic_total"} <= set(meta.files):
+            return None
+        stat = np.asarray(meta["flux_err_statistical"], dtype=np.float64)
+        syst = np.asarray(meta["flux_err_systematic_total"], dtype=np.float64)
+    if stat.shape[0] != n_rows:
+        return None
+    return np.sqrt(stat ** 2 + syst ** 2)
+
+
+def make_test_diagnostic_plots(
+    out_dir, test_dates, y_true, y_pred, y_err, bins,
+    panel_sets=((0, 6, 12, 18), (2, 8, 14, 20)),
+):
+    """Three figure types from 小导's scripts, drawn on the test set only.
+
+    1) test_relerr_timeseries/bin_XX_*.pdf  -- per bin, top: observed vs
+       predicted flux over time; bottom: signed relative difference
+       (pred/obs - 1) over time          [draw_n2p_residual_*: seed_N_test_error]
+    2) test_panels_bins_<a>_<b>_<c>_<d>.pdf -- 4 stacked panels per set
+       (bins 1/7/13/19 as 小导, plus 3/9/15/21): AMS Data with error bars +
+       prediction, both test samples only, same marker size
+                                          [draw_n2p_residual_interpolate: n2p_seed_N]
+    3) test_relerr_vs_rigidity.pdf       -- 2-D histogram of the signed
+       relative difference vs rigidity, with the per-bin mean overlaid
+                                          [draw_error_n2p_residual_interpolate]
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    order = np.argsort(np.asarray(test_dates))
+    dates = [test_dates[i] for i in order]
+    obs = np.asarray(y_true)[order]
+    prd = np.asarray(y_pred)[order]
+    err = np.asarray(y_err)[order] if y_err is not None else None
+    rel = prd / obs - 1.0                              # signed, like 小导
+    n_bins = obs.shape[1]
+    obs_color, pred_color = "#d62728", "#1a73e8"
+    flux_label = _flux_label()
+    paths: list[str] = []
+
+    def year_axis(axis):
+        axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=5, maxticks=10))
+        axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        axis.tick_params(direction="in", top=True, right=True)
+
+    # 1) per bin: flux + signed relative difference vs time
+    rel_dir = out_dir / "test_relerr_timeseries"
+    rel_dir.mkdir(parents=True, exist_ok=True)
+    for j in range(n_bins):
+        figure, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(12.0, 7.0), sharex=True,
+            gridspec_kw={"height_ratios": [2, 1]},
+        )
+        ax1.plot(dates, obs[:, j], linestyle="none", marker=".", markersize=4,
+                 color=obs_color, markeredgewidth=0, label="AMS Data (test)")
+        ax1.plot(dates, prd[:, j], linestyle="none", marker=".", markersize=3,
+                 color=pred_color, markeredgewidth=0, label="predicted (test)")
+        ax1.set_ylabel(flux_label)
+        ax1.set_title(f"{PLOT_LABELS['particle']}, [{bins[j][0]:g}, {bins[j][1]:g}] "
+                      f"{PLOT_LABELS['unit']}  (test set)",
+                      fontsize=13, fontweight="bold")
+        ax1.legend(loc="best", frameon=False, markerscale=2.5)
+        ax2.axhline(0.0, color="0.4", linewidth=0.8)
+        ax2.plot(dates, rel[:, j], linestyle="none", marker=".", markersize=4,
+                 color=pred_color, markeredgewidth=0)
+        ax2.set_ylabel("pred / obs - 1")
+        ax2.set_xlabel("year")
+        ax2.text(0.01, 0.95,
+                 f"mean {np.mean(rel[:, j]) * 100:+.2f}%   "
+                 f"mean |.| {np.mean(np.abs(rel[:, j])) * 100:.2f}%",
+                 transform=ax2.transAxes, ha="left", va="top", fontsize=9)
+        for axis in (ax1, ax2):
+            year_axis(axis)
+        figure.tight_layout()
+        path = rel_dir / f"bin_{j + 1:02d}_{bins[j][0]:g}-{bins[j][1]:g}{PLOT_LABELS['unit']}.pdf"
+        figure.savefig(path, format="pdf", bbox_inches="tight")
+        plt.close(figure)
+        paths.append(str(path))
+
+    # 2) stacked panels with AMS error bars, one figure per bin set
+    for panel_bins in panel_sets:
+      chosen = [j for j in panel_bins if j < n_bins]
+      if chosen:
+          figure, axes = plt.subplots(len(chosen), 1, figsize=(10.0, 2.6 * len(chosen)),
+                                      sharex=True, squeeze=False)
+          for axis, j in zip(axes[:, 0], chosen):
+              if err is not None:
+                  axis.errorbar(dates, obs[:, j], yerr=err[:, j], fmt="o",
+                                markersize=2.5, markeredgewidth=0,
+                                color=obs_color, ecolor=obs_color,
+                                elinewidth=0.6, alpha=0.8,
+                                label=f"AMS Data (test), {PLOT_LABELS['err']}")
+              else:
+                  axis.plot(dates, obs[:, j], linestyle="none", marker="o",
+                            markersize=2.5, markeredgewidth=0,
+                            color=obs_color, label="AMS Data (test)")
+              axis.plot(dates, prd[:, j], linestyle="none", marker="o", markersize=2.5,
+                        color=pred_color, markeredgewidth=0,
+                        label="model prediction (test)")
+              axis.text(0.99, 0.06, f"[{bins[j][0]:g}, {bins[j][1]:g}] {PLOT_LABELS['unit']}",
+                        transform=axis.transAxes, ha="right", fontsize=10,
+                        fontweight="bold")
+              year_axis(axis)
+          axes[0, 0].legend(loc="upper left", frameon=False, fontsize=9, markerscale=2)
+          axes[-1, 0].set_xlabel("year")
+          figure.supylabel(PLOT_LABELS["particle"] + " " + flux_label, fontsize=11)
+          figure.tight_layout()
+          tag = "_".join(str(j + 1) for j in chosen)
+          path = out_dir / f"test_panels_bins_{tag}.pdf"
+          figure.savefig(path, format="pdf", bbox_inches="tight")
+          plt.close(figure)
+          paths.append(str(path))
+
+    # 3) 2-D histogram: signed relative difference vs rigidity
+    paths.append(plot_relerr_vs_rigidity(out_dir, rel, bins))
+    return paths
+
+
+# y range of the relative-difference 2-D histogram (points outside are not
+# drawn; the red per-bin mean still uses every test day)
+RELERR_YLIM = 0.1
+
+
+def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None):
+    """2-D histogram of (pred/obs - 1) vs rigidity, fixed y range +-ylim."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from matplotlib.ticker import MultipleLocator
+
+    ylim = RELERR_YLIM if ylim is None else float(ylim)
+    rel = np.asarray(rel, dtype=np.float64)
+    edges = np.asarray([bins[0][0]] + [b[1] for b in bins], dtype=np.float64)
+    centers = np.sqrt(edges[:-1] * edges[1:])
+    n_y = int(round(2 * ylim / 0.005))              # 0.005-wide rows, like 小导
+    y_edges = np.linspace(-ylim, ylim, n_y + 1)
+    x_vals = np.repeat(centers[None, :], rel.shape[0], axis=0).ravel()
+    # np.histogram2d drops values outside y_edges -> out-of-range days not drawn
+    counts, _, _ = np.histogram2d(x_vals, rel.ravel(), bins=[edges, y_edges])
+    n_out = int(np.sum(np.abs(rel) > ylim))
+    figure, axis = plt.subplots(figsize=(9.0, 6.0))
+    masked = np.ma.masked_where(counts.T == 0, counts.T)
+    mesh = axis.pcolormesh(edges, y_edges, masked, cmap="viridis",
+                           norm=LogNorm(vmin=1, vmax=max(1, counts.max())))
+    figure.colorbar(mesh, ax=axis, label="test days")
+    axis.plot(centers, rel.mean(axis=0), "o--", color="red", markersize=4,
+              linewidth=1.2, label="mean per bin")
+    axis.axhline(0.0, color="0.3", linewidth=0.8)
+    axis.set_xscale("log")
+    axis.set_ylim(-ylim, ylim)
+    axis.yaxis.set_major_locator(MultipleLocator(ylim / 10.0))
+    axis.set_xlabel(f"{PLOT_LABELS['axis']} ({PLOT_LABELS['unit']})")
+    axis.set_ylabel("relative difference  (pred / obs - 1)")
+    axis.set_title(f"test set: relative difference vs {PLOT_LABELS['axis']}")
+    axis.legend(loc="lower right", frameon=False)
+    axis.tick_params(direction="in", top=True, right=True, which="both")
+    figure.tight_layout()
+    path = Path(out_dir) / "test_relerr_vs_rigidity.pdf"
+    figure.savefig(path, format="pdf", bbox_inches="tight")
+    plt.close(figure)
+    print(f"relerr 2-D histogram: {n_out} of {rel.size} (day, bin) points "
+          f"outside +-{ylim:g} not drawn")
+    return str(path)
 
 
 # --------------------------------------------------------------------------
@@ -534,6 +762,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val-frac", type=float, default=0.1)
     parser.add_argument("--patience", type=int, default=200)
     parser.add_argument("--min-delta", type=float, default=1e-6)
+    parser.add_argument(
+        "--init", choices=("keras", "torch"), default="keras",
+        help="weight init: 'keras' = glorot_uniform + zero bias as 小导's Keras "
+             "code (default); 'torch' = PyTorch default (Kaiming-uniform)",
+    )
+    parser.add_argument(
+        "--drop-last", action="store_true",
+        help="drop the last incomplete training batch each epoch (old behaviour); "
+             "default keeps it, as Keras model.fit does",
+    )
     parser.add_argument(
         "--device", default=None,
         help="torch device (default: cuda > mps > cpu)",
@@ -642,7 +880,7 @@ def main() -> int:
     y_val_s = scaler_y.transform(y_val)
     y_test_s = scaler_y.transform(y_test)
 
-    model, kernels = build_model(n_stations, n_bins, args.dropout)
+    model, kernels = build_model(n_stations, n_bins, args.dropout, init=args.init)
     model.to(device)
     print("kernels:", kernels)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -668,12 +906,12 @@ def main() -> int:
     y_test_t = torch.as_tensor(y_test_s, dtype=torch.float32, device=device)
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(X_train_t, y_train_t),
-        batch_size=args.batch_size, shuffle=True, drop_last=True,
+        batch_size=args.batch_size, shuffle=True, drop_last=args.drop_last,
     )
 
-    model_dir = args.output_dir / "Model" / "n2p"
-    fig_dir = args.output_dir / "Figure" / "n2p"
-    err_dir = args.output_dir / "Error" / "n2p"
+    model_dir = args.output_dir / "Model"
+    fig_dir = args.output_dir / "Figure"
+    err_dir = args.output_dir / "Error"
     for path in (model_dir, fig_dir, err_dir):
         path.mkdir(parents=True, exist_ok=True)
     tag = (
@@ -681,6 +919,15 @@ def main() -> int:
         f"{args.epochs}ep_lr{args.lr}_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
     )
     ckpt_path = model_dir / f"{tag}_best.pt"
+    # the two train-split scalers, so nmdb_n2p_extend.py can reuse them as-is
+    scaler_path = model_dir / "scalers.npz"
+    np.savez(
+        scaler_path,
+        stations=np.asarray(used_stations),
+        x_data_min=scaler_x.data_min_, x_data_max=scaler_x.data_max_,
+        y_data_min=scaler_y.data_min_, y_data_max=scaler_y.data_max_,
+        y_is_log10=np.asarray(True),
+    )
 
     train_losses: list[float] = []
     val_losses: list[float] = []
@@ -752,6 +999,8 @@ def main() -> int:
         pred_by_split[name] = pred_flux
         np.save(err_dir / f"{tag}_{name}_true_flux.npy", true_flux)
         np.save(err_dir / f"{tag}_{name}_pred_flux.npy", pred_flux)
+        # signed relative difference per (day, bin), as 小导 saves it
+        np.save(err_dir / f"{tag}_{name}_rel_error.npy", pred_flux / true_flux - 1.0)
         metrics[name] = {
             "mse_log10": float(np.mean((np.log10(pred_flux) - y_log_true) ** 2)),
             "mae_log10": float(np.mean(np.abs(np.log10(pred_flux) - y_log_true))),
@@ -783,6 +1032,16 @@ def main() -> int:
             )
         except Exception as exc:
             print(f"[skip timeseries plots] {exc}")
+        try:
+            total_err = read_proton_total_error(args.proton_meta, len(proton_dates))
+            test_err = total_err[test_idx] if total_err is not None else None
+            diag_paths = make_test_diagnostic_plots(
+                fig_dir, list(date_splits["test"]), test_true, test_pred,
+                test_err, bins,
+            )
+            plot_paths = list(plot_paths) + diag_paths
+        except Exception as exc:
+            print(f"[skip test diagnostic plots] {exc}")
 
     summary = {
         "framework": "pytorch",
@@ -800,10 +1059,15 @@ def main() -> int:
         "epochs": args.epochs,
         "epochs_run": len(train_losses),
         "best_epoch": best_epoch,
+        # early-stopping criterion (MSE + L2 on the scaled target); 小导 picks
+        # the data_seed with the lowest value -> nmdb_n2p_select_seed.py
+        "best_val_loss": float(best_val) if best_epoch > 0 else None,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
         "l2": args.l2,
         "dropout": args.dropout,
+        "init": args.init,
+        "drop_last": args.drop_last,
         "test_frac": args.test_frac,
         "val_frac": args.val_frac,
         "early_stopping": {"patience": args.patience, "min_delta": args.min_delta},
@@ -811,6 +1075,7 @@ def main() -> int:
         "outputs": {
             "model_dir": str(model_dir),
             "checkpoint": str(ckpt_path),
+            "scalers": str(scaler_path),
             "figure_dir": str(fig_dir),
             "error_dir": str(err_dir),
             "plots": plot_paths,
