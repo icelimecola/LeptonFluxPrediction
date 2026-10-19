@@ -27,6 +27,8 @@ Adaptive-N Conv1D residual network:
 with k = [min(7, N), min(5, N), min(3, N)].
 
 Training mirrors 小导: log10 target, MinMax scaling (fit on train only),
+(``--no-log`` skips the log10 and MinMax-scales the raw flux instead, for the
+log-vs-linear target comparison; the default is unchanged),
 random 80/10/10 split controlled by --data-seed, Adamax, MSE loss,
 early stopping on val_loss + keep the best-val weights.
 
@@ -283,14 +285,43 @@ def inverse_log_minmax(values: np.ndarray, scaler) -> np.ndarray:
     return np.power(10.0, scaler.inverse_transform(values))
 
 
-def predict_flux(model, X, scaler_y, device):
+def inverse_target(values: np.ndarray, scaler, y_is_log10: bool = True) -> np.ndarray:
+    """scaled -> flux; log10 target (default) or raw-flux target (--no-log)."""
+    if y_is_log10:
+        return inverse_log_minmax(values, scaler)
+    return scaler.inverse_transform(values)
+
+
+def write_scalers_csv(path: Path, stations, x_min, x_max, y_min, y_max,
+                      bins, y_is_log10: bool) -> None:
+    """Human-readable copy of scalers.npz (same numbers), one row per station / bin.
+
+    range = data_max - data_min, in the units MinMax worked in (raw counts for
+    x; log10(flux) or raw flux for y). max_over_min is always in physical units.
+    """
+    transform = "log10" if y_is_log10 else "linear"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["kind", "index", "name", "rigidity_min_GV", "rigidity_max_GV",
+                         "data_min", "data_max", "range", "max_over_min", "transform"])
+        for i, (name, lo, hi) in enumerate(zip(stations, x_min, x_max), start=1):
+            writer.writerow(["x_neutron", i, name, "", "", f"{lo:.10g}", f"{hi:.10g}",
+                             f"{hi - lo:.10g}", f"{hi / lo:.10g}", "none"])
+        for i, (lo, hi) in enumerate(zip(y_min, y_max), start=1):
+            rmin, rmax = bins[i - 1] if bins is not None else ("", "")
+            ratio = 10.0 ** (hi - lo) if y_is_log10 else hi / lo
+            writer.writerow(["y_proton", i, f"bin{i:02d}", rmin, rmax, f"{lo:.10g}",
+                             f"{hi:.10g}", f"{hi - lo:.10g}", f"{ratio:.10g}", transform])
+
+
+def predict_flux(model, X, scaler_y, device, y_is_log10: bool = True):
     import torch
 
     model.eval()
     with torch.no_grad():
         tensor = torch.as_tensor(X, dtype=torch.float32, device=device)
         pred_scaled = model(tensor).cpu().numpy()
-    return inverse_log_minmax(pred_scaled, scaler_y)
+    return inverse_target(pred_scaled, scaler_y, y_is_log10)
 
 
 # --------------------------------------------------------------------------
@@ -551,9 +582,104 @@ def read_proton_total_error(meta_path: Path, n_rows: int):
     return np.sqrt(stat ** 2 + syst ** 2)
 
 
+# Which AMS error the relative-difference figure uses (switch to compare):
+#   "daily": sqrt(1^2 + 2^2) = stat (+) time-dependent syst -- the day-to-day
+#            error AMS uses for its periodicity analysis; the time-independent
+#            part cancels in pred/obs - 1 because the model learns it from AMS
+#   "total": sqrt(1^2 + 3^2) = stat (+) total syst -- the full error of a point;
+#            numerically what Zhao et al. 2026 Fig. 2 (bottom, red) shows
+RELERR_AMS_ERR = "total"
+RELERR_AMS_ERR_COLUMNS = {
+    "daily": "flux_err_timedependent",
+    "total": "flux_err_systematic_total",
+}
+RELERR_AMS_ERR_LABELS = {
+    "daily": "AMS stat$\\oplus$time-dep. syst (mean)",
+    "total": "AMS stat$\\oplus$syst (mean)",
+}
+
+
+def read_proton_daily_relerr(meta_path: Path, rows=None, kind=None):
+    """AMS relative error for every (day, bin), shape (n_days, n_bins):
+    sqrt(stat^2 + syst^2) / flux, where syst is the time-dependent column
+    (kind "daily") or the total systematic column (kind "total"); kind None
+    uses RELERR_AMS_ERR.
+
+    ``rows`` selects the days (row indices of the proton meta), e.g. the test
+    split, so it describes the same days as the plotted predictions; None uses
+    every day. Returns None when the meta file lacks the needed columns.
+    """
+    kind = RELERR_AMS_ERR if kind is None else kind
+    syst_col = RELERR_AMS_ERR_COLUMNS[kind]
+    with np.load(meta_path) as meta:
+        need = {"flux", "flux_err_statistical", syst_col}
+        if not need <= set(meta.files):
+            return None
+        flux = np.asarray(meta["flux"], dtype=np.float64)
+        stat = np.asarray(meta["flux_err_statistical"], dtype=np.float64)
+        syst = np.asarray(meta[syst_col], dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rel = np.sqrt(stat ** 2 + syst ** 2) / flux
+    if rows is not None:
+        rel = rel[np.asarray(rows)]
+    return rel
+
+
+def read_proton_daily_relerr_band(meta_path: Path, rows=None, kind=None):
+    """Per-bin mean over the selected days of read_proton_daily_relerr."""
+    rel = read_proton_daily_relerr(meta_path, rows=rows, kind=kind)
+    return None if rel is None else np.nanmean(rel, axis=0)
+
+
+def read_proton_relerr_parts(meta_path: Path, rows=None):
+    """Per-bin mean over the selected days of the AMS error components, as
+    relative errors: {"stat": stat/flux, "syst": total syst/flux,
+    "daily": sqrt(stat^2 + time-dependent syst^2)/flux}. Used for the separate
+    statistical / systematic bands of the relative-difference figure. Returns
+    None when the meta file lacks the columns."""
+    cols = ("flux", "flux_err_statistical", "flux_err_systematic_total",
+            "flux_err_timedependent")
+    with np.load(meta_path) as meta:
+        if not set(cols) <= set(meta.files):
+            return None
+        flux, stat, syst, tdep = (np.asarray(meta[c], dtype=np.float64) for c in cols)
+    if rows is not None:
+        rows = np.asarray(rows)
+        flux, stat, syst, tdep = flux[rows], stat[rows], syst[rows], tdep[rows]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return {
+            "stat": np.nanmean(stat / flux, axis=0),
+            "syst": np.nanmean(syst / flux, axis=0),
+            "daily": np.nanmean(np.sqrt(stat ** 2 + tdep ** 2) / flux, axis=0),
+        }
+
+
+def match_proton_rows(meta_path: Path, flux_rows: np.ndarray) -> np.ndarray:
+    """Row index in the proton meta of each given flux row (e.g. a saved
+    *_test_true_flux.npy). Raises if any row has no exact match, so a band is
+    never silently computed on the wrong days."""
+    with np.load(meta_path) as meta:
+        flux = np.asarray(meta["flux"], dtype=np.float64)
+    lookup = {row.tobytes(): i for i, row in enumerate(flux)}
+    rows = []
+    for k, row in enumerate(np.asarray(flux_rows, dtype=np.float64)):
+        i = lookup.get(row.tobytes())
+        if i is None:
+            close = np.where(np.all(np.isclose(flux, row, rtol=1e-9, atol=0), axis=1))[0]
+            if close.size != 1:
+                raise ValueError(f"flux row {k} not found in {meta_path}")
+            i = int(close[0])
+        rows.append(i)
+    return np.asarray(rows)
+
+
 def make_test_diagnostic_plots(
     out_dir, test_dates, y_true, y_pred, y_err, bins,
     panel_sets=((0, 6, 12, 18), (2, 8, 14, 20)),
+    relerr_band=None,
+    relerr_daily=None,
+    relerr_label=None,
+    relerr_parts=None,
 ):
     """Three figure types from 小导's scripts, drawn on the test set only.
 
@@ -660,8 +786,19 @@ def make_test_diagnostic_plots(
           paths.append(str(path))
 
     # 3) 2-D histogram: signed relative difference vs rigidity
-    paths.append(plot_relerr_vs_rigidity(out_dir, rel, bins))
+    paths.append(plot_relerr_vs_rigidity(out_dir, rel, bins, err_band=relerr_band,
+                                         err_daily=relerr_daily,
+                                         err_label=relerr_label,
+                                         err_parts=relerr_parts))
     return paths
+
+
+# AMS error components drawn as light-red lines (err_parts of
+# plot_relerr_vs_rigidity): statistical dashed, total systematic dotted
+PARTS_STYLE = {
+    "stat": {"color": "#f08a8a", "ls": "--", "label": "AMS stat (mean)"},
+    "syst": {"color": "#f4b6b6", "ls": ":", "label": "AMS syst (mean)"},
+}
 
 
 # y range of the relative-difference 2-D histogram (points outside are not
@@ -669,8 +806,36 @@ def make_test_diagnostic_plots(
 RELERR_YLIM = 0.1
 
 
-def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None):
-    """2-D histogram of (pred/obs - 1) vs rigidity, fixed y range +-ylim."""
+def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None, err_band=None,
+                            show_std=None, err_daily=None, ams_err_kind=None,
+                            err_label=None, err_parts=None):
+    """Relative difference (pred/obs - 1) vs rigidity, after Zhao et al. 2026
+    (ApJS 282:5) Fig. 2.
+
+    Top panel: 2-D histogram of pred/obs - 1 over the plotted (test) days,
+    fixed y range +-ylim, with per bin
+      * blue points: the mean (overall bias of the prediction);
+      * blue steps:  mean +- standard deviation (the spread of the prediction,
+                     centred on its own mean so it matches the histogram);
+      * red steps:   +- the AMS day-to-day relative error (mean over the days),
+                     centred on 0.
+    Bottom panel (only with ``err_daily``): 2-D histogram of the daily AMS
+    relative error sqrt(stat^2 + time-dependent syst^2)/flux of the same days,
+    its per-bin mean (red points) and the std of pred/obs - 1 (blue points,
+    taken as the model's uncertainty by Zhao et al.), so the two widths can be
+    compared directly.
+
+    ``err_parts`` (optional, protons): read_proton_relerr_parts of the plotted
+    days; adds two light-red step lines, +- AMS stat (dashed) and +- AMS total
+    syst (dotted), centred on 0 to the top panel, and the same two as lines
+    (mean per bin) to the bottom panel (no distribution of them is drawn).
+
+    ``err_daily``: (n_days, n_bins) daily AMS relative error of the plotted days
+    (read_proton_daily_relerr with the test rows); ``err_band`` defaults to its
+    per-bin mean. Callers without AMS errors (e.g. nmdb_p2pos.py) pass neither
+    and get the top panel with the mean only, as before. ``show_std`` defaults
+    to "an AMS error is given".
+    """
     import matplotlib
 
     matplotlib.use("Agg")
@@ -678,39 +843,301 @@ def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None):
     from matplotlib.colors import LogNorm
     from matplotlib.ticker import MultipleLocator
 
+    red, blue = "#d62728", "#1a73e8"
+    # which AMS error err_daily/err_band hold (legend text only)
+    ams_err_kind = RELERR_AMS_ERR if ams_err_kind is None else ams_err_kind
+    # legend of the AMS error; err_label overrides it for data whose error is
+    # not the proton stat/syst split (e.g. the single positron error column)
+    err_text = err_label if err_label is not None else RELERR_AMS_ERR_LABELS[ams_err_kind]
     ylim = RELERR_YLIM if ylim is None else float(ylim)
     rel = np.asarray(rel, dtype=np.float64)
+    if err_daily is not None:
+        err_daily = np.asarray(err_daily, dtype=np.float64)
+        if err_band is None:
+            err_band = np.nanmean(err_daily, axis=0)
+    if show_std is None:
+        show_std = err_band is not None
     edges = np.asarray([bins[0][0]] + [b[1] for b in bins], dtype=np.float64)
     centers = np.sqrt(edges[:-1] * edges[1:])
-    n_y = int(round(2 * ylim / 0.005))              # 0.005-wide rows, like 小导
-    y_edges = np.linspace(-ylim, ylim, n_y + 1)
-    x_vals = np.repeat(centers[None, :], rel.shape[0], axis=0).ravel()
-    # np.histogram2d drops values outside y_edges -> out-of-range days not drawn
-    counts, _, _ = np.histogram2d(x_vals, rel.ravel(), bins=[edges, y_edges])
+    mean = rel.mean(axis=0)
+    std = rel.std(axis=0)          # every plotted day, also those outside +-ylim
+
+    def steps(values):             # step outline over the bin edges
+        values = np.asarray(values, dtype=np.float64)
+        return np.append(values, values[-1])
+
+    def hist2d(axis, values, y_edges, label):
+        x_vals = np.repeat(centers[None, :], values.shape[0], axis=0).ravel()
+        flat = values.ravel()
+        ok = np.isfinite(flat)
+        counts, _, _ = np.histogram2d(x_vals[ok], flat[ok], bins=[edges, y_edges])
+        masked = np.ma.masked_where(counts.T == 0, counts.T)
+        mesh = axis.pcolormesh(edges, y_edges, masked, cmap="viridis",
+                               norm=LogNorm(vmin=1, vmax=max(1, counts.max())))
+        axis.figure.colorbar(mesh, ax=axis, label=label)
+
     n_out = int(np.sum(np.abs(rel) > ylim))
-    figure, axis = plt.subplots(figsize=(9.0, 6.0))
-    masked = np.ma.masked_where(counts.T == 0, counts.T)
-    mesh = axis.pcolormesh(edges, y_edges, masked, cmap="viridis",
-                           norm=LogNorm(vmin=1, vmax=max(1, counts.max())))
-    figure.colorbar(mesh, ax=axis, label="test days")
-    axis.plot(centers, rel.mean(axis=0), "o--", color="red", markersize=4,
-              linewidth=1.2, label="mean per bin")
-    axis.axhline(0.0, color="0.3", linewidth=0.8)
-    axis.set_xscale("log")
-    axis.set_ylim(-ylim, ylim)
-    axis.yaxis.set_major_locator(MultipleLocator(ylim / 10.0))
-    axis.set_xlabel(f"{PLOT_LABELS['axis']} ({PLOT_LABELS['unit']})")
-    axis.set_ylabel("relative difference  (pred / obs - 1)")
-    axis.set_title(f"test set: relative difference vs {PLOT_LABELS['axis']}")
-    axis.legend(loc="lower right", frameon=False)
-    axis.tick_params(direction="in", top=True, right=True, which="both")
-    figure.tight_layout()
-    path = Path(out_dir) / "test_relerr_vs_rigidity.pdf"
-    figure.savefig(path, format="pdf", bbox_inches="tight")
-    plt.close(figure)
+
+    def draw(layout):
+        """layout "tall": panels stacked (paper); "wide": side by side (slides)."""
+        if err_daily is None:
+            figure, axis = plt.subplots(figsize=(9.0, 6.0))
+            ax_lo = None
+        elif layout == "tall":
+            figure, (axis, ax_lo) = plt.subplots(
+                2, 1, figsize=(9.0, 9.5), sharex=True,
+                gridspec_kw={"height_ratios": [2.0, 1.2]},
+            )
+        else:
+            figure, (axis, ax_lo) = plt.subplots(
+                1, 2, figsize=(16.0, 6.4),
+                gridspec_kw={"width_ratios": [1.0, 1.0]},
+            )
+        xlabel = f"{PLOT_LABELS['axis']} ({PLOT_LABELS['unit']})"
+
+        # ---- relative difference ----------------------------------------
+        # 40 rows over +-ylim (row height ylim/20): 0.005 for protons at
+        # ylim 0.1, like 小导; wider rows for the noisier positrons
+        hist2d(axis, rel, np.linspace(-ylim, ylim, 41), "test days")
+        if err_band is not None:
+            band = steps(err_band)
+            axis.step(edges, band, where="post", color=red, linewidth=1.6, zorder=3,
+                      label=err_text)
+            axis.step(edges, -band, where="post", color=red, linewidth=1.6, zorder=3)
+        if err_parts is not None:
+            # thin light-red lines only (no fill), so the histogram stays visible
+            for key, style in PARTS_STYLE.items():
+                band = steps(err_parts[key])
+                axis.step(edges, band, where="post", color=style["color"],
+                          linestyle=style["ls"], linewidth=1.3, zorder=3,
+                          label=style["label"])
+                axis.step(edges, -band, where="post", color=style["color"],
+                          linestyle=style["ls"], linewidth=1.3, zorder=3)
+        if show_std:
+            axis.step(edges, steps(mean + std), where="post", color=blue,
+                      linewidth=1.6, zorder=3,
+                      label="mean $\\pm$ std of relative difference")
+            axis.step(edges, steps(mean - std), where="post", color=blue,
+                      linewidth=1.6, zorder=3)
+        axis.plot(centers, mean, "o--", color=blue, markersize=4,
+                  linewidth=1.2, label="mean per bin", zorder=4)
+        axis.axhline(0.0, color="0.3", linewidth=0.8)
+        axis.set_xscale("log")
+        axis.set_ylim(-ylim, ylim)
+        axis.yaxis.set_major_locator(MultipleLocator(ylim / 10.0))
+        axis.set_ylabel("relative difference  (pred / obs - 1)")
+        axis.set_title(f"test set: relative difference vs {PLOT_LABELS['axis']}")
+        axis.legend(loc="lower right", frameon=True, facecolor="white",
+                    framealpha=0.8, edgecolor="none")
+        axis.tick_params(direction="in", top=True, right=True, which="both")
+
+        # ---- relative uncertainties -------------------------------------
+        if ax_lo is not None:
+            finite = err_daily[np.isfinite(err_daily)]
+            # own range, not capped by the top panel: every red/blue point fits
+            top = max(float(np.max(std)), float(np.nanmax(err_band)),
+                      float(np.percentile(finite, 99.5)) if finite.size else 0.0)
+            top = max(top * 1.15, 0.01)
+            hist2d(ax_lo, err_daily, np.linspace(0.0, top, 61), "test days")
+            ax_lo.plot(centers, err_band, "o", color=red, markersize=4, zorder=4,
+                       label=err_text)
+            if err_parts is not None:
+                for key, style in PARTS_STYLE.items():
+                    ax_lo.plot(centers, err_parts[key], marker="o", markersize=3,
+                               color=style["color"], linestyle=style["ls"],
+                               linewidth=1.3, zorder=4, label=style["label"])
+            ax_lo.plot(centers, std, "o-", color=blue, markersize=4, linewidth=1.2,
+                       zorder=4, label="std of relative difference (model)")
+            ax_lo.set_xscale("log")
+            ax_lo.set_xlim(edges[0], edges[-1])
+            ax_lo.set_ylim(0.0, top)
+            ax_lo.set_ylabel("relative uncertainty")
+            ax_lo.legend(loc="upper right", frameon=True, facecolor="white",
+                         framealpha=0.8, edgecolor="none")
+            ax_lo.tick_params(direction="in", top=True, right=True, which="both")
+            ax_lo.set_xlabel(xlabel)
+            if layout == "wide":
+                axis.set_xlabel(xlabel)
+                ax_lo.set_title(f"test set: relative uncertainties vs "
+                                f"{PLOT_LABELS['axis']}")
+        else:
+            axis.set_xlabel(xlabel)
+
+        figure.tight_layout()
+        name = ("test_relerr_vs_rigidity.pdf" if layout == "tall"
+                else "test_relerr_vs_rigidity_wide.pdf")
+        path = Path(out_dir) / name
+        figure.savefig(path, format="pdf", bbox_inches="tight")
+        plt.close(figure)
+        return path
+
+    path = draw("tall")
+    if err_daily is not None:
+        # same content side by side, 16:9-ish, for slides
+        print(f"relerr figure (wide, for slides): {draw('wide')}")
     print(f"relerr 2-D histogram: {n_out} of {rel.size} (day, bin) points "
           f"outside +-{ylim:g} not drawn")
     return str(path)
+
+
+# --------------------------------------------------------------------------
+# --select-seed: compare the seed*/ runs of one group and pick the best
+# --------------------------------------------------------------------------
+# 小导 trains one model per data_seed and keeps the one with the lowest
+# best val loss (the early-stopping value, MSE + L2 on the scaled target).
+# The test set is not used to choose, so the chosen run's test numbers stay
+# unbiased. "--select-by test_mre" exists only for comparison and is flagged.
+SELECT_LOWBIN = 5                       # bins 1..5 (~1-1.9 GV) for the 2017 bias
+SELECT_WINDOW = ("2017-07-01", "2017-11-01")
+
+
+def _sel_split_indices(n, test_frac, val_frac, data_seed):
+    """Same two-step split as nmdb_n2p.py (sklearn ShuffleSplit semantics)."""
+    def once(idx, frac):
+        n_test = math.ceil(frac * len(idx))
+        perm = np.random.RandomState(data_seed).permutation(len(idx))
+        return idx[perm[n_test:]], idx[perm[:n_test]]
+
+    train_idx, test_idx = once(np.arange(n), test_frac)
+    train_idx, val_idx = once(train_idx, val_frac / (1.0 - test_frac))
+    return train_idx, val_idx, test_idx
+
+
+def _sel_one_file(folder: Path, pattern: str):
+    hits = sorted(folder.glob(pattern))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _sel_window_bias(rel, dates, lo, hi):
+    sel = (dates >= np.datetime64(lo)) & (dates < np.datetime64(hi))
+    return (float(rel[sel, :SELECT_LOWBIN].mean()), int(sel.sum())) if sel.any() else (float("nan"), 0)
+
+
+def _sel_collect(n2p_dir: Path, proton_dates, summary_name="n2p_summary.json"):
+    rows = []
+    for summary_path in sorted(n2p_dir.glob(f"seed*/{summary_name}")):
+        run = summary_path.parent
+        s = json.loads(summary_path.read_text(encoding="utf-8"))
+        m = s["metrics"]
+        row = {
+            "seed": int(s["data_seed"]),
+            "run_dir": str(run),
+            "best_val_loss": float(s["best_val_loss"]) if s.get("best_val_loss") is not None else float("nan"),
+            "best_epoch": s.get("best_epoch"),
+            "epochs_run": s.get("epochs_run"),
+            "train_mre": m["train"]["mean_abs_relative_error"],
+            "val_mre": m["val"]["mean_abs_relative_error"],
+            "test_mre": m["test"]["mean_abs_relative_error"],
+        }
+        err = run / "Error"
+        rel_test = _sel_one_file(err, "*_test_rel_error.npy")
+        rel_train = _sel_one_file(err, "*_train_rel_error.npy")
+        if rel_test is not None and rel_train is not None and proton_dates is not None:
+            rt, rr = np.load(rel_test), np.load(rel_train)
+            row["test_mre_bin1"] = float(np.abs(rt[:, 0]).mean())
+            row["test_bias"] = float(rt.mean())
+            tr, _, te = _sel_split_indices(len(proton_dates), s["test_frac"], s["val_frac"], s["data_seed"])
+            if len(te) == len(rt) and len(tr) == len(rr):
+                row["train_bias_2017_low"], _ = _sel_window_bias(rr, proton_dates[tr], *SELECT_WINDOW)
+                row["test_bias_2017_low"], row["n_test_2017"] = _sel_window_bias(rt, proton_dates[te], *SELECT_WINDOW)
+        rows.append(row)
+    return rows
+
+
+
+def select_seed(n2p_dir: Path, proton_meta, by: str = "val_loss",
+                summary_name: str = "n2p_summary.json", label: str = "n2p") -> int:
+    """Write seed_summary.csv, best_seed.json, seed_selection.pdf into n2p_dir.
+
+    Also used by nmdb_p2pos.py (summary_name="p2pos_summary.json",
+    proton_meta=None): the 2017 low-rigidity proton columns are then left empty.
+    """
+    n2p_dir = Path(n2p_dir)
+    group = n2p_dir.name.removeprefix("nmdb_n2p_").removeprefix("nmdb_p2pos_")
+    proton_dates = None
+    if proton_meta is not None and Path(proton_meta).is_file():
+        with np.load(proton_meta, allow_pickle=True) as meta:
+            proton_dates = np.asarray(meta["dates"]).astype("datetime64[D]")
+    rows = _sel_collect(n2p_dir, proton_dates, summary_name)
+    if not rows:
+        raise SystemExit(f"no seed*/{summary_name} under {n2p_dir}")
+
+    key = {"val_loss": "best_val_loss", "val_mre": "val_mre", "test_mre": "test_mre"}[by]
+    vals = np.array([r[key] for r in rows], dtype=float)
+    if np.all(np.isnan(vals)):
+        raise SystemExit(f"no run has {key}; re-run with the current nmdb_n2p.py or use --by val_mre")
+    best = rows[int(np.nanargmin(vals))]
+    rows.sort(key=lambda r: (math.isnan(r[key]), r[key]))
+
+    cols = ["seed", "best_val_loss", "best_epoch", "epochs_run", "train_mre", "val_mre",
+            "test_mre", "test_mre_bin1", "test_bias", "train_bias_2017_low",
+            "test_bias_2017_low", "n_test_2017", "run_dir"]
+    with (n2p_dir / "seed_summary.csv").open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in cols})
+
+    test = np.array([r["test_mre"] for r in rows])
+    spread = {
+        "n_seeds": len(rows),
+        "test_mre_mean": float(test.mean()), "test_mre_std": float(test.std(ddof=1)) if len(test) > 1 else 0.0,
+        "test_mre_min": float(test.min()), "test_mre_max": float(test.max()),
+    }
+    out = {
+        "group": group, "criterion": by,
+        "note": "test set used for selection -> optimistic" if by == "test_mre" else "test set not used for selection",
+        "best_seed": best["seed"], "best_run_dir": best["run_dir"],
+        "best": {k: best.get(k) for k in cols if k != "run_dir"},
+        "all_seeds": spread,
+        "missing_best_val_loss": [r["seed"] for r in rows if math.isnan(r["best_val_loss"])],
+    }
+    (n2p_dir / "best_seed.json").write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    print(f"{'seed':>4} {'val_loss':>10} {'test MRE':>9} {'bin1':>7} {'2017 tr':>8} {'2017 te':>8}")
+    for r in rows:
+        f = lambda k, s=100: (f"{r[k]*s:+.2f}%" if k.endswith('bias_2017_low') else f"{r[k]*s:.2f}%") if isinstance(r.get(k), float) and not math.isnan(r[k]) else "-"
+        mark = "  <- best" if r is best else ""
+        print(f"{r['seed']:>4} {r['best_val_loss']:>10.6f} {f('test_mre'):>9} {f('test_mre_bin1'):>7} "
+              f"{f('train_bias_2017_low'):>8} {f('test_bias_2017_low'):>8}{mark}")
+    print(f"test MRE over {len(rows)} seeds: {100*spread['test_mre_mean']:.3f}% +- {100*spread['test_mre_std']:.3f}% "
+          f"(min {100*spread['test_mre_min']:.3f}%, max {100*spread['test_mre_max']:.3f}%)")
+    print(f"best by {by}: seed{best['seed']}  -> {n2p_dir / 'best_seed.json'}")
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        by_seed = sorted(rows, key=lambda r: r["seed"])
+        seeds = [r["seed"] for r in by_seed]
+        tm = np.array([r["test_mre"] for r in by_seed]) * 100
+        fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.5))
+        a1.plot(seeds, tm, "o", color="#1a73e8", markersize=5)
+        a1.plot([best["seed"]], [best["test_mre"] * 100], "o", color="red", markersize=8,
+                label=f"chosen (by {by}): seed {best['seed']}")
+        a1.axhline(tm.mean(), color="0.4", linewidth=1, label=f"mean {tm.mean():.3f}%")
+        if len(tm) > 1:
+            a1.axhspan(tm.mean() - tm.std(ddof=1), tm.mean() + tm.std(ddof=1), color="0.85", label="mean +- std")
+        a1.set_xlabel("data_seed"); a1.set_ylabel("test MRE (%)")
+        a1.legend(frameon=False, fontsize=9)
+        vl = np.array([r["best_val_loss"] for r in by_seed])
+        ok = ~np.isnan(vl)
+        a2.plot(vl[ok], tm[ok], "o", color="#1a73e8", markersize=5)
+        if not math.isnan(best["best_val_loss"]):
+            a2.plot([best["best_val_loss"]], [best["test_mre"] * 100], "o", color="red", markersize=8)
+        for s_, x_, y_ in zip(np.array(seeds)[ok], vl[ok], tm[ok]):
+            a2.annotate(str(s_), (x_, y_), fontsize=7, xytext=(3, 3), textcoords="offset points")
+        a2.set_xlabel("best val loss"); a2.set_ylabel("test MRE (%)")
+        for a in (a1, a2):
+            a.tick_params(direction="in", top=True, right=True)
+        fig.suptitle(f"{label} {group}: {len(rows)} data_seeds")
+        fig.tight_layout()
+        fig.savefig(n2p_dir / "seed_selection.pdf", bbox_inches="tight")
+        plt.close(fig)
+    except Exception as exc:  # plotting is optional
+        print(f"[skip plot] {exc}")
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -791,6 +1218,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
+        "--no-log", action="store_true",
+        help="target = raw flux (per-bin MinMax only, no log10); default is "
+             "log10 + MinMax as 小导. Output file tag gets a '_nolog' suffix",
+    )
+    parser.add_argument(
+        "--select-seed", action="store_true",
+        help="no training: compare all <output-dir>/seed*/ runs of one group, "
+             "write seed_summary.csv, best_seed.json and seed_selection.pdf "
+             "into <output-dir> (e.g. --output-dir data/nmdb_n2p_lowrc9lj)",
+    )
+    parser.add_argument(
+        "--select-by", choices=("val_loss", "val_mre", "test_mre"), default="val_loss",
+        help="criterion for --select-seed (default val_loss, as 小导; "
+             "test_mre uses the test set to choose -> optimistic)",
+    )
+    parser.add_argument(
         "--seed", type=int, default=42, help="global seed for weight init etc."
     )
     return parser
@@ -798,6 +1241,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.select_seed:
+        return select_seed(args.output_dir, args.proton_meta, args.select_by)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -848,7 +1293,11 @@ def main() -> int:
     print(f"aligned days={n_days} stations={n_stations} bins={n_bins}")
     print("stations:", ", ".join(used_stations))
 
-    y_log = np.log10(y_raw)
+    y_is_log10 = not args.no_log
+    # training target: log10(flux) (default) or the raw flux (--no-log);
+    # the name y_log is kept below, it holds whichever target is used
+    y_log = np.log10(y_raw) if y_is_log10 else np.asarray(y_raw, dtype=np.float64)
+    print("target:", "log10(flux) + MinMax" if y_is_log10 else "raw flux + MinMax (no log)")
 
     # split by index so the dates of each split are kept for the time-series plots
     all_idx = np.arange(len(X))
@@ -917,7 +1366,7 @@ def main() -> int:
     tag = (
         f"seed{args.data_seed}_{n_stations}st_"
         f"{args.epochs}ep_lr{args.lr}_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
-    )
+    ) + ("" if y_is_log10 else "_nolog")
     ckpt_path = model_dir / f"{tag}_best.pt"
     # the two train-split scalers, so nmdb_n2p_extend.py can reuse them as-is
     scaler_path = model_dir / "scalers.npz"
@@ -926,7 +1375,13 @@ def main() -> int:
         stations=np.asarray(used_stations),
         x_data_min=scaler_x.data_min_, x_data_max=scaler_x.data_max_,
         y_data_min=scaler_y.data_min_, y_data_max=scaler_y.data_max_,
-        y_is_log10=np.asarray(True),
+        y_is_log10=np.asarray(y_is_log10),
+    )
+    # same coefficients as a table you can open directly (Excel / text editor)
+    scaler_csv_path = model_dir / "scalers.csv"
+    write_scalers_csv(
+        scaler_csv_path, used_stations, scaler_x.data_min_, scaler_x.data_max_,
+        scaler_y.data_min_, scaler_y.data_max_, read_bins(args.proton_meta), y_is_log10,
     )
 
     train_losses: list[float] = []
@@ -993,17 +1448,22 @@ def main() -> int:
     true_by_split: dict[str, np.ndarray] = {}
     pred_by_split: dict[str, np.ndarray] = {}
     for name, (X_in, y_log_true) in splits.items():
-        true_flux = np.power(10.0, y_log_true)
-        pred_flux = predict_flux(model, X_in, scaler_y, device)
+        true_flux = np.power(10.0, y_log_true) if y_is_log10 else np.asarray(y_log_true)
+        pred_flux = predict_flux(model, X_in, scaler_y, device, y_is_log10)
         true_by_split[name] = true_flux
         pred_by_split[name] = pred_flux
         np.save(err_dir / f"{tag}_{name}_true_flux.npy", true_flux)
         np.save(err_dir / f"{tag}_{name}_pred_flux.npy", pred_flux)
         # signed relative difference per (day, bin), as 小导 saves it
         np.save(err_dir / f"{tag}_{name}_rel_error.npy", pred_flux / true_flux - 1.0)
+        # log10 metrics on positive predictions only (a raw-flux target can
+        # give pred <= 0); n_nonpositive_pred reports how many were left out
+        positive = pred_flux > 0
+        dlog = np.log10(pred_flux[positive]) - np.log10(true_flux[positive])
         metrics[name] = {
-            "mse_log10": float(np.mean((np.log10(pred_flux) - y_log_true) ** 2)),
-            "mae_log10": float(np.mean(np.abs(np.log10(pred_flux) - y_log_true))),
+            "mse_log10": float(np.mean(dlog ** 2)) if dlog.size else None,
+            "mae_log10": float(np.mean(np.abs(dlog))) if dlog.size else None,
+            "n_nonpositive_pred": int((~positive).sum()),
             "mse_physical": float(np.mean((pred_flux - true_flux) ** 2)),
             "mae_physical": float(np.mean(np.abs(pred_flux - true_flux))),
             "mean_abs_relative_error": float(
@@ -1038,6 +1498,10 @@ def main() -> int:
             diag_paths = make_test_diagnostic_plots(
                 fig_dir, list(date_splits["test"]), test_true, test_pred,
                 test_err, bins,
+                relerr_daily=read_proton_daily_relerr(args.proton_meta,
+                                                      rows=test_idx),
+                relerr_parts=read_proton_relerr_parts(args.proton_meta,
+                                                      rows=test_idx),
             )
             plot_paths = list(plot_paths) + diag_paths
         except Exception as exc:
@@ -1060,7 +1524,7 @@ def main() -> int:
         "epochs_run": len(train_losses),
         "best_epoch": best_epoch,
         # early-stopping criterion (MSE + L2 on the scaled target); 小导 picks
-        # the data_seed with the lowest value -> nmdb_n2p_select_seed.py
+        # the data_seed with the lowest value -> --select-seed
         "best_val_loss": float(best_val) if best_epoch > 0 else None,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
@@ -1071,11 +1535,13 @@ def main() -> int:
         "test_frac": args.test_frac,
         "val_frac": args.val_frac,
         "early_stopping": {"patience": args.patience, "min_delta": args.min_delta},
+        "target_transform": "log10" if y_is_log10 else "linear",
         "metrics": metrics,
         "outputs": {
             "model_dir": str(model_dir),
             "checkpoint": str(ckpt_path),
             "scalers": str(scaler_path),
+            "scalers_csv": str(scaler_csv_path),
             "figure_dir": str(fig_dir),
             "error_dir": str(err_dir),
             "plots": plot_paths,
