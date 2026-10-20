@@ -1190,6 +1190,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=200)
     parser.add_argument("--min-delta", type=float, default=1e-6)
     parser.add_argument(
+        "--lr-scheduler", choices=("none", "plateau"), default="none",
+        help="'none' = fixed lr (default, old behaviour); 'plateau' = "
+             "ReduceLROnPlateau on the val loss",
+    )
+    parser.add_argument("--lr-factor", type=float, default=0.5,
+                        help="plateau: multiply lr by this on each reduction")
+    parser.add_argument("--lr-patience", type=int, default=30,
+                        help="plateau: epochs without val improvement before "
+                             "lowering lr (keep well below --patience)")
+    parser.add_argument("--min-lr", type=float, default=1e-6,
+                        help="plateau: lr is never lowered below this")
+    parser.add_argument(
         "--init", choices=("keras", "torch"), default="keras",
         help="weight init: 'keras' = glorot_uniform + zero bias as 小导's Keras "
              "code (default); 'torch' = PyTorch default (Kaiming-uniform)",
@@ -1342,6 +1354,16 @@ def main() -> int:
     optimizer = torch.optim.Adamax(
         model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-7,
     )
+    # optional lr decay: lower lr when the val loss stalls. "Improved" uses the
+    # same absolute min_delta as early stopping below.
+    scheduler = None
+    if args.lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=args.lr_factor,
+            patience=args.lr_patience, threshold=args.min_delta,
+            threshold_mode="abs", min_lr=args.min_lr,
+        )
+    lr_changes: list[dict] = []
     mse = torch.nn.MSELoss()
 
     def criterion(pred, target):
@@ -1366,7 +1388,10 @@ def main() -> int:
     tag = (
         f"seed{args.data_seed}_{n_stations}st_"
         f"{args.epochs}ep_lr{args.lr}_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
-    ) + ("" if y_is_log10 else "_nolog")
+    ) + ("" if y_is_log10 else "_nolog") + (
+        "" if args.lr_scheduler == "none"
+        else f"_plat{args.lr_factor}p{args.lr_patience}"
+    )
     ckpt_path = model_dir / f"{tag}_best.pt"
     # the two train-split scalers, so nmdb_n2p_extend.py can reuse them as-is
     scaler_path = model_dir / "scalers.npz"
@@ -1411,6 +1436,14 @@ def main() -> int:
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         test_losses.append(test_loss)
+
+        if scheduler is not None:
+            old_lr = optimizer.param_groups[0]["lr"]
+            scheduler.step(val_loss)
+            new_lr = optimizer.param_groups[0]["lr"]
+            if new_lr < old_lr:
+                lr_changes.append({"epoch": epoch, "lr": new_lr})
+                print(f"epoch {epoch:5d} lr reduced {old_lr:.3g} -> {new_lr:.3g}")
 
         improved = val_loss < best_val - args.min_delta
         if improved:
@@ -1528,6 +1561,15 @@ def main() -> int:
         "best_val_loss": float(best_val) if best_epoch > 0 else None,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
+        "lr_scheduler": None if scheduler is None else {
+            "type": "ReduceLROnPlateau",
+            "factor": args.lr_factor,
+            "patience": args.lr_patience,
+            "min_lr": args.min_lr,
+            "threshold": args.min_delta,
+            "final_lr": optimizer.param_groups[0]["lr"],
+            "changes": lr_changes,
+        },
         "l2": args.l2,
         "dropout": args.dropout,
         "init": args.init,
