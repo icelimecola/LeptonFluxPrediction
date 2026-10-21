@@ -70,6 +70,13 @@ def read_proton_spliced(meta_path: Path):
     return dates, flux, measured, out_of_range, bins
 
 
+def read_proton_period(meta_path: Path):
+    """``period`` of proton_extend_meta.npz: 1 = AMS PRL measured day, 2 = gap
+    inside the AMS PRL range (n2p interpolation), 0 = outside (extrapolation)."""
+    with np.load(meta_path) as meta:
+        return np.asarray(meta["period"]) if "period" in meta.files else None
+
+
 def read_positron_root(path: Path):
     """posflux.root -> (dates, flux, err, bins); same cuts as dataproc_fluxpos.py."""
     try:
@@ -130,6 +137,12 @@ def build_parser():
                         help="smoke run: epochs<=500, output into <output-dir>/quick")
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
+        "--train-range", choices=("ams", "all"), default="ams",
+        help="training days: 'ams' (default) = only days inside the AMS PRL published "
+             "range of the proton input (period 1/2: PRL measured where present, n2p "
+             "interpolation in the gaps); 'all' = every aligned positron day, incl. "
+             "n2p extrapolation after the PRL range (old behaviour)")
+    parser.add_argument(
         "--init", choices=("keras", "torch"), default="keras",
         help="weight init, as nmdb_n2p.py: 'keras' = glorot_uniform + zero bias "
              "(default); 'torch' = PyTorch default")
@@ -189,10 +202,21 @@ def main() -> int:
     print(f"positron     : {e_dates[0]} .. {e_dates[-1]}  bins={len(e_bins)} "
           f"({e_bins[0][0]:g}-{e_bins[-1][1]:g} GeV)")
 
-    # training days: every positron bin measured, and inside the proton range
+    # training days: every positron bin measured, and inside the proton range;
+    # with --train-range ams also inside the AMS PRL range (no extrapolated input)
     lookup = {d: i for i, d in enumerate(p_dates)}
     complete = np.isfinite(e_flux).all(axis=1)
-    pos_rows = [k for k, d in enumerate(e_dates) if complete[k] and d in lookup]
+    allowed = np.ones(len(p_dates), dtype=bool)
+    if args.train_range == "ams":
+        period = read_proton_period(proton_meta)
+        if period is None:
+            raise SystemExit("--train-range ams needs 'period' in the proton extend meta")
+        allowed = period > 0
+        inside = [p_dates[i] for i in np.where(allowed)[0]]
+        print(f"train range  : AMS PRL range {inside[0]} .. {inside[-1]} "
+              f"({int((period == 1).sum())} measured + {int((period == 2).sum())} gap days)")
+    pos_rows = [k for k, d in enumerate(e_dates)
+                if complete[k] and d in lookup and allowed[lookup[d]]]
     if not pos_rows:
         raise SystemExit("no complete positron day inside the proton range")
     pro_rows = np.asarray([lookup[e_dates[k]] for k in pos_rows])
@@ -370,8 +394,12 @@ def main() -> int:
         "best_val_loss": float(best_val) if best_epoch > 0 else None,
         "init": args.init, "drop_last": args.drop_last,
         "relerr_ylim": args.relerr_ylim,
-        "train_days": "all aligned days (AMS-measured proton where available, "
-                      "n2p prediction elsewhere, incl. out-of-range inputs)",
+        "train_range": args.train_range,
+        "train_days": ("days inside the AMS PRL published range only: PRL measured "
+                       "proton where present (per day and bin), n2p interpolation in "
+                       "the gaps" if args.train_range == "ams" else
+                       "all aligned days (AMS-measured proton where available, "
+                       "n2p prediction elsewhere, incl. out-of-range inputs)"),
         "batch_size": args.batch_size, "learning_rate": args.lr, "l2": args.l2,
         "dropout": args.dropout, "test_frac": args.test_frac, "val_frac": args.val_frac,
         "early_stopping": {"patience": args.patience, "min_delta": args.min_delta},
