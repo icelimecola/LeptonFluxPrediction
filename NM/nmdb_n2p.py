@@ -673,6 +673,107 @@ def match_proton_rows(meta_path: Path, flux_rows: np.ndarray) -> np.ndarray:
     return np.asarray(rows)
 
 
+# --------------------------------------------------------------------------
+# Zhao et al. 2026 (ApJS 282:5) five metrics: R^2, MAE, MPE, RMSE, chi^2/dof
+# (pure numpy; nmdb_n2p_paper_metrics.py reuses these for finished runs)
+PAPER_METRIC_SPLITS = ("train", "val", "test", "all")
+PAPER_METRIC_COLUMNS = (
+    "split", "n_days", "n_cells", "R2_paper", "R2_per_bin_mean",
+    "MAE", "MPE_percent", "RMSE", "chi2dof_total", "chi2dof_daily",
+)
+
+
+def read_proton_sigma(meta_path: Path, kind: str, n_rows: int | None = None):
+    """Absolute AMS error per (day, bin), rows = rows of the proton meta.
+    kind "total": stat (+) total syst; "daily": stat (+) time-dependent syst.
+    Returns None if the columns are missing or the row count differs."""
+    syst_col = RELERR_AMS_ERR_COLUMNS[kind]
+    with np.load(meta_path) as meta:
+        if not {"flux_err_statistical", syst_col} <= set(meta.files):
+            return None
+        stat = np.asarray(meta["flux_err_statistical"], dtype=np.float64)
+        syst = np.asarray(meta[syst_col], dtype=np.float64)
+    if n_rows is not None and stat.shape[0] != n_rows:
+        return None
+    return np.sqrt(stat ** 2 + syst ** 2)
+
+
+def _chi2dof(diff, sigma):
+    """Mean over days of chi2/dof, chi2 = sum_k (diff/sigma)^2 over the valid
+    bins of a day, dof = number of valid bins (p = 0, paper Eq. 5-6)."""
+    if sigma is None:
+        return None
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z2 = (diff / sigma) ** 2
+    ok = np.isfinite(z2) & (sigma > 0)
+    k = ok.sum(axis=1)
+    keep = k > 0
+    if not keep.any():
+        return None
+    per_day = np.where(ok, z2, 0.0).sum(axis=1)[keep] / k[keep]
+    return float(per_day.mean())
+
+
+def paper_metrics(true_flux, pred_flux, sig_total=None, sig_daily=None) -> dict:
+    """Five metrics of Zhao et al. 2026 on one set of (day, bin) cells, physical
+    flux. n = days x bins (all cells pooled), as the paper reports one number.
+      R2_paper        1 - sum(diff^2) / sum((y - mean(all cells))^2)  (Eq. 4;
+                      pooled over bins, so dominated by the bin-to-bin spread)
+      R2_per_bin_mean R^2 of each bin over its days, then averaged over bins
+      MAE / RMSE      flux units; MPE in %, sign: pred - true (negative =
+                      under-prediction, as in the paper)
+      chi2dof_*       sigma = AMS total / daily error, see _chi2dof"""
+    t = np.asarray(true_flux, dtype=np.float64)
+    p = np.asarray(pred_flux, dtype=np.float64)
+    diff = p - t
+    ss_res_bin = np.sum(diff ** 2, axis=0)
+    ss_tot_bin = np.sum((t - t.mean(axis=0)) ** 2, axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r2_bin = 1.0 - ss_res_bin / ss_tot_bin
+    return {
+        "n_days": int(t.shape[0]),
+        "n_cells": int(t.size),
+        "R2_paper": float(1.0 - np.sum(diff ** 2) / np.sum((t - t.mean()) ** 2)),
+        "R2_per_bin_mean": float(np.nanmean(r2_bin)),
+        "MAE": float(np.mean(np.abs(diff))),
+        "MPE_percent": float(np.mean(diff / t) * 100.0),
+        "RMSE": float(np.sqrt(np.mean(diff ** 2))),
+        "chi2dof_total": _chi2dof(diff, sig_total),
+        "chi2dof_daily": _chi2dof(diff, sig_daily),
+    }
+
+
+def paper_metrics_by_split(true_by, pred_by, rows_by, sig_total, sig_daily) -> dict:
+    """paper_metrics for train / val / test and for all days pooled.
+    rows_by[name] = rows of the proton meta (to pick the AMS errors)."""
+    pick = lambda sig, rows: None if sig is None else sig[np.asarray(rows)]
+    out = {}
+    for name in ("train", "val", "test"):
+        out[name] = paper_metrics(true_by[name], pred_by[name],
+                                  pick(sig_total, rows_by[name]),
+                                  pick(sig_daily, rows_by[name]))
+    cat = lambda d: np.concatenate([d[n] for n in ("train", "val", "test")])
+    rows_all = np.concatenate([np.asarray(rows_by[n]) for n in ("train", "val", "test")])
+    out["all"] = paper_metrics(cat(true_by), cat(pred_by),
+                               pick(sig_total, rows_all), pick(sig_daily, rows_all))
+    return out
+
+
+def write_paper_metrics(out_dir: Path, pm: dict) -> tuple[Path, Path]:
+    """paper_metrics.json + paper_metrics.csv (one row per split) in out_dir."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "paper_metrics.json"
+    json_path.write_text(json.dumps(pm, indent=2) + "\n", encoding="utf-8")
+    csv_path = out_dir / "paper_metrics.csv"
+    with csv_path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(PAPER_METRIC_COLUMNS)
+        for name in PAPER_METRIC_SPLITS:
+            if name in pm:
+                w.writerow([name] + [pm[name][c] for c in PAPER_METRIC_COLUMNS[1:]])
+    return json_path, csv_path
+
+
 def make_test_diagnostic_plots(
     out_dir, test_dates, y_true, y_pred, y_err, bins,
     panel_sets=((0, 6, 12, 18), (2, 8, 14, 20)),
@@ -808,7 +909,8 @@ RELERR_YLIM = 0.1
 
 def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None, err_band=None,
                             show_std=None, err_daily=None, ams_err_kind=None,
-                            err_label=None, err_parts=None):
+                            err_label=None, err_parts=None,
+                            name="test_relerr_vs_rigidity"):
     """Relative difference (pred/obs - 1) vs rigidity, after Zhao et al. 2026
     (ApJS 282:5) Fig. 2.
 
@@ -829,6 +931,8 @@ def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None, err_band=None,
     days; adds two light-red step lines, +- AMS stat (dashed) and +- AMS total
     syst (dotted), centred on 0 to the top panel, and the same two as lines
     (mean per bin) to the bottom panel (no distribution of them is drawn).
+
+    ``name``: output file stem -> <name>.pdf and <name>_wide.pdf in out_dir.
 
     ``err_daily``: (n_days, n_bins) daily AMS relative error of the plotted days
     (read_proton_daily_relerr with the test rows); ``err_band`` defaults to its
@@ -964,9 +1068,8 @@ def plot_relerr_vs_rigidity(out_dir, rel, bins, ylim=None, err_band=None,
             axis.set_xlabel(xlabel)
 
         figure.tight_layout()
-        name = ("test_relerr_vs_rigidity.pdf" if layout == "tall"
-                else "test_relerr_vs_rigidity_wide.pdf")
-        path = Path(out_dir) / name
+        fname = f"{name}.pdf" if layout == "tall" else f"{name}_wide.pdf"
+        path = Path(out_dir) / fname
         figure.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(figure)
         return path
@@ -1202,6 +1305,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-lr", type=float, default=1e-6,
                         help="plateau: lr is never lowered below this")
     parser.add_argument(
+        "--loss-weight", choices=("none", "ams"), default="none",
+        help="'none' = plain MSE (default, old behaviour); 'ams' = chi^2-like "
+             "weight per (day, bin): w = (R_k ln10 / eps_ik)^2 / c, eps = AMS "
+             "relative error, c = mean of the raw weight over the train split",
+    )
+    parser.add_argument(
+        "--ams-err", choices=("daily", "total"), default="daily",
+        help="ams weight: 'daily' = stat (+) time-dependent syst (default); "
+             "'total' = stat (+) total syst",
+    )
+    parser.add_argument(
         "--init", choices=("keras", "torch"), default="keras",
         help="weight init: 'keras' = glorot_uniform + zero bias as 小导's Keras "
              "code (default); 'torch' = PyTorch default (Kaiming-uniform)",
@@ -1341,6 +1455,40 @@ def main() -> int:
     y_val_s = scaler_y.transform(y_val)
     y_test_s = scaler_y.transform(y_test)
 
+    # optional per-(day, bin) loss weight from the AMS error (chi^2-like).
+    # w~_ik = (R_k ln10 / eps_ik)^2 with R_k = max - min of log10 flux (train),
+    # eps_ik = AMS relative error; then w = w~ / c, c = mean of w~ over the train
+    # split (one global constant). So w * (yhat - y)^2 = ((ln phat - ln p)/eps)^2 / c:
+    # R_k cancels, each bin's error is counted in units of its AMS error.
+    use_w = args.loss_weight == "ams"
+    loss_weight_c = None
+    n_eps_filled = 0
+    if use_w:
+        if not y_is_log10:
+            raise SystemExit("--loss-weight ams needs the log10 target (drop --no-log)")
+        eps = read_proton_daily_relerr(args.proton_meta, kind=args.ams_err)
+        if eps is None:
+            raise SystemExit(f"--loss-weight ams: no AMS error columns in {args.proton_meta}")
+        if eps.shape != y_log.shape:
+            raise SystemExit(f"AMS error shape {eps.shape} != proton matrix {y_log.shape}")
+        bad = ~np.isfinite(eps) | (eps <= 0)
+        n_eps_filled = int(bad.sum())
+        if n_eps_filled:
+            # fill missing errors with the bin's median so no point gets w = inf/nan
+            med = np.nanmedian(np.where(bad, np.nan, eps), axis=0)
+            eps = np.where(bad, med[None, :], eps)
+            print(f"AMS error: {n_eps_filled} missing/non-positive values filled with bin median")
+        R = scaler_y.data_max_ - scaler_y.data_min_
+        w_raw = (R[None, :] * np.log(10.0) / eps) ** 2
+        loss_weight_c = float(np.mean(w_raw[train_idx]))
+        w_all = w_raw / loss_weight_c
+        print(f"loss weight: ams ({args.ams_err}), c = {loss_weight_c:.6g}; "
+              f"per-bin mean w (train): bin1 {w_all[train_idx, 0].mean():.3g}, "
+              f"bin{n_bins} {w_all[train_idx, -1].mean():.3g}")
+    else:
+        w_all = np.ones_like(y_log)
+    w_train, w_val, w_test = w_all[train_idx], w_all[val_idx], w_all[test_idx]
+
     model, kernels = build_model(n_stations, n_bins, args.dropout, init=args.init)
     model.to(device)
     print("kernels:", kernels)
@@ -1366,8 +1514,9 @@ def main() -> int:
     lr_changes: list[dict] = []
     mse = torch.nn.MSELoss()
 
-    def criterion(pred, target):
-        return mse(pred, target) + args.l2 * torch.sum(model.head.weight ** 2)
+    def criterion(pred, target, weight=None):
+        data = mse(pred, target) if weight is None else torch.mean(weight * (pred - target) ** 2)
+        return data + args.l2 * torch.sum(model.head.weight ** 2)
 
     X_train_t = torch.as_tensor(X_train, dtype=torch.float32)
     y_train_t = torch.as_tensor(y_train_s, dtype=torch.float32)
@@ -1375,8 +1524,11 @@ def main() -> int:
     y_val_t = torch.as_tensor(y_val_s, dtype=torch.float32, device=device)
     X_test_t = torch.as_tensor(X_test, dtype=torch.float32, device=device)
     y_test_t = torch.as_tensor(y_test_s, dtype=torch.float32, device=device)
+    w_train_t = torch.as_tensor(w_train, dtype=torch.float32)
+    w_val_t = torch.as_tensor(w_val, dtype=torch.float32, device=device) if use_w else None
+    w_test_t = torch.as_tensor(w_test, dtype=torch.float32, device=device) if use_w else None
     loader = torch.utils.data.DataLoader(
-        torch.utils.data.TensorDataset(X_train_t, y_train_t),
+        torch.utils.data.TensorDataset(X_train_t, y_train_t, w_train_t),
         batch_size=args.batch_size, shuffle=True, drop_last=args.drop_last,
     )
 
@@ -1391,7 +1543,7 @@ def main() -> int:
     ) + ("" if y_is_log10 else "_nolog") + (
         "" if args.lr_scheduler == "none"
         else f"_plat{args.lr_factor}p{args.lr_patience}"
-    )
+    ) + ("" if not use_w else f"_wams-{args.ams_err}")
     ckpt_path = model_dir / f"{tag}_best.pt"
     # the two train-split scalers, so nmdb_n2p_extend.py can reuse them as-is
     scaler_path = model_dir / "scalers.npz"
@@ -1419,11 +1571,11 @@ def main() -> int:
     for epoch in range(1, args.epochs + 1):
         model.train()
         batch_losses = []
-        for xb, yb in loader:
+        for xb, yb, wb in loader:
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            loss = criterion(model(xb), yb, wb.to(device) if use_w else None)
             loss.backward()
             optimizer.step()
             batch_losses.append(float(loss.item()))
@@ -1431,8 +1583,8 @@ def main() -> int:
 
         model.eval()
         with torch.no_grad():
-            val_loss = float(criterion(model(X_val_t), y_val_t).item())
-            test_loss = float(criterion(model(X_test_t), y_test_t).item())
+            val_loss = float(criterion(model(X_val_t), y_val_t, w_val_t).item())
+            test_loss = float(criterion(model(X_test_t), y_test_t, w_test_t).item())
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         test_losses.append(test_loss)
@@ -1505,6 +1657,17 @@ def main() -> int:
         }
         print(name, json.dumps(metrics[name]))
 
+    # Zhao et al. 2026 five metrics, per split and for all days
+    paper = paper_metrics_by_split(
+        true_by_split, pred_by_split,
+        {"train": train_idx, "val": val_idx, "test": test_idx},
+        read_proton_sigma(args.proton_meta, "total", len(proton_dates)),
+        read_proton_sigma(args.proton_meta, "daily", len(proton_dates)),
+    )
+    paper_json, paper_csv = write_paper_metrics(args.output_dir, paper)
+    for name in PAPER_METRIC_SPLITS:
+        print("paper", name, json.dumps(paper[name]))
+
     plot_paths: list[str] = []
     ts_paths: list[str] = []
     if not args.no_plots:
@@ -1561,6 +1724,15 @@ def main() -> int:
         "best_val_loss": float(best_val) if best_epoch > 0 else None,
         "batch_size": args.batch_size,
         "learning_rate": args.lr,
+        # with --loss-weight ams the losses (and best_val_loss) are chi^2 / c,
+        # not comparable to plain-MSE runs; compare the metrics instead
+        "loss_weight": None if not use_w else {
+            "type": "ams",
+            "ams_err": args.ams_err,
+            "formula": "w = (R_k*ln10/eps_ik)^2 / c, c = train mean",
+            "c": loss_weight_c,
+            "n_eps_filled": n_eps_filled,
+        },
         "lr_scheduler": None if scheduler is None else {
             "type": "ReduceLROnPlateau",
             "factor": args.lr_factor,
@@ -1579,6 +1751,8 @@ def main() -> int:
         "early_stopping": {"patience": args.patience, "min_delta": args.min_delta},
         "target_transform": "log10" if y_is_log10 else "linear",
         "metrics": metrics,
+        # Zhao et al. 2026 metrics, also in paper_metrics.{json,csv}
+        "paper_metrics": paper,
         "outputs": {
             "model_dir": str(model_dir),
             "checkpoint": str(ckpt_path),
