@@ -117,8 +117,10 @@ def read_positron_exposure(path: Path, prefix: str, dates, bins):
 
 
 def build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
-                      p_measured, p_oor, allowed):
-    """Window samples as nmdb_aggregate.aggregate (see --avg-window)."""
+                      p_measured, p_oor, allowed, complete=True, sys=None):
+    """Window samples as nmdb_aggregate.aggregate (see --avg-window).
+    complete=False keeps windows with any bin filled (the caller rebins and
+    filters, --pos-bins ams)."""
     import nmdb_aggregate as agg
     lookup = {d: i for i, d in enumerate(p_dates)}
     in_range = np.asarray([d in lookup and bool(allowed[lookup[d]]) for d in e_dates])
@@ -130,6 +132,8 @@ def build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
     flux_m = np.where(has, e_flux, np.nan)
     e_lookup = {d: i for i, d in enumerate(e_dates)}
     rec = {k: [] for k in ("start", "end", "x", "y", "err", "n_days", "meas", "oor")}
+    if sys is not None:           # fully correlated syst: exposure-weighted linear mean
+        rec["sys"] = []
     used_days = []
     n_all = 0
     for w in agg.make_windows(days_with[0], days_with[-1], length):
@@ -139,14 +143,23 @@ def build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
             continue
         n_all += 1
         f, sig, _tot, _n = agg.exposure_mean(flux_m, e_err, expo, rows)
-        if not (np.isfinite(f).all() and np.isfinite(sig).all()):
+        if complete and not (np.isfinite(f).all() and np.isfinite(sig).all()):
             continue                                   # every bin needs a value
+        if not np.isfinite(f).any():
+            continue
         p_rows = np.asarray([lookup[e_dates[i]] for i in rows])
         rec["start"].append(w["start"])
         rec["end"].append(w["end"])
         rec["x"].append(p_flux[p_rows].mean(axis=0))   # equal weight, linear flux
         rec["y"].append(f)
         rec["err"].append(sig)
+        if sys is not None:
+            ok = has[rows]
+            tw = np.where(ok, expo[rows], 0.0)
+            tt = tw.sum(axis=0)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rec["sys"].append(np.where(tt > 0, (tw * np.where(ok, sys[rows], 0.0)).sum(axis=0)
+                                           / tt, np.nan))
         rec["n_days"].append(len(rows))
         rec["meas"].append(p_measured[p_rows].mean())
         rec["oor"].append(bool(p_oor[p_rows].any()))
@@ -155,6 +168,116 @@ def build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
     out["n_windows_with_data"] = n_all
     out["first_day"], out["last_day"] = min(used_days), max(used_days)
     return out
+
+
+def read_ams_positron_syst(path: Path):
+    """AMS published daily positron table (Positron_daily_origin_published_21.csv)
+    -> (bins, relative time-dependent syst, relative total syst) per bin. The
+    ratios are constant in time (checked: every day within 5 % of the median)."""
+    import csv
+    per = {}
+    with Path(path).open(encoding="utf-8") as fh:
+        reader = csv.reader(fh)
+        next(reader)
+        for row in reader:
+            flux = float(row[3])
+            if flux > 0:
+                per.setdefault((float(row[1]), float(row[2])), []).append(
+                    (float(row[5]) / flux, float(row[6]) / flux))
+    bins = sorted(per)
+    td, tot = [], []
+    for b in bins:
+        r = np.asarray(per[b])
+        for k, name in ((0, "time-dependent"), (1, "total")):
+            med = np.median(r[:, k])
+            if np.max(np.abs(r[:, k] / med - 1.0)) > 0.05:
+                raise SystemExit(f"{path}: relative {name} syst of bin {b} is not constant")
+        td.append(float(np.median(r[:, 0])))
+        tot.append(float(np.median(r[:, 1])))
+    return [tuple(b) for b in bins], np.asarray(td), np.asarray(tot)
+
+
+def read_ams_positron_daily(path: Path):
+    """AMS published daily positrons as a daily calendar (first..last day):
+    (dates, flux, stat, timedep_syst, total_syst, bins); NaN = no value."""
+    import csv
+    rows = {}
+    with Path(path).open(encoding="utf-8") as fh:
+        reader = csv.reader(fh)
+        next(reader)
+        for r in reader:
+            rows[(dt.date.fromisoformat(r[0]), float(r[1]), float(r[2]))] = [
+                float(x) for x in r[3:7]]
+    bins = sorted({(k[1], k[2]) for k in rows})
+    days = sorted({k[0] for k in rows})
+    dates = [days[0] + dt.timedelta(n) for n in range((days[-1] - days[0]).days + 1)]
+    di = {d: i for i, d in enumerate(dates)}
+    bi = {b: j for j, b in enumerate(bins)}
+    out = np.full((4, len(dates), len(bins)), np.nan)
+    for (d, lo, hi), v in rows.items():
+        if v[0] > 0:
+            out[:, di[d], bi[(lo, hi)]] = v
+    return dates, out[0], out[1], out[2], out[3], [tuple(b) for b in bins]
+
+
+def coarse_exposure(exposure_root: Path, prefix: str, dates, coarse_bins, fine_bins,
+                    fine_flux):
+    """Daily exposure of each coarse bin from the fine-bin exposures of
+    hexps-pos.root: T_k = sum_j c_j T_j / sum_j c_j over the fine bins j in k,
+    c_j = dE_j x median fine flux (expected-count weight; the fine exposures
+    differ within a coarse bin, e.g. x1.4-2 below 1.33 GeV)."""
+    expo_f = read_positron_exposure(exposure_root, prefix, dates, fine_bins)
+    owner = containing_bins(fine_bins, coarse_bins)
+    width = np.asarray([b[1] - b[0] for b in fine_bins])
+    c = width * np.nanmedian(fine_flux, axis=0)
+    out = np.zeros((len(dates), len(coarse_bins)))
+    for k in range(len(coarse_bins)):
+        sub = np.where(owner == k)[0]
+        out[:, k] = (expo_f[:, sub] * c[sub]).sum(axis=1) / c[sub].sum()
+    return out
+
+
+def containing_bins(fine_bins, coarse_bins):
+    """Index of the coarse bin that contains each fine bin; error if a fine bin
+    is not inside exactly one coarse bin."""
+    out = []
+    for lo, hi in fine_bins:
+        k = [i for i, (clo, chi) in enumerate(coarse_bins)
+             if clo - 1e-6 <= lo and hi <= chi + 1e-6]
+        if len(k) != 1:
+            raise SystemExit(f"bin {lo:g}-{hi:g} is not inside exactly one of {coarse_bins}")
+        out.append(k[0])
+    return np.asarray(out)
+
+
+def rebin_positron(flux, err, fine_bins, coarse_bins):
+    """Merge fine energy bins into the coarse ones (--pos-bins ams), per row:
+    flux = width-weighted mean over the sub-bins that have a value (missing
+    sub-bins skipped), stat error = sqrt(sum((e_j dE_j)^2)) / sum(dE_j) over
+    the same sub-bins; NaN when no sub-bin has a value. The coarse bins must
+    be tiled exactly by the fine ones."""
+    owner = containing_bins(fine_bins, coarse_bins)
+    lo = np.asarray([b[0] for b in fine_bins])
+    hi = np.asarray([b[1] for b in fine_bins])
+    width = hi - lo
+    out_f = np.full(flux.shape[:-1] + (len(coarse_bins),), np.nan)
+    out_e = np.full_like(out_f, np.nan)
+    for k, (clo, chi) in enumerate(coarse_bins):
+        sub = np.where(owner == k)[0]
+        if (sub.size == 0 or not np.isclose(lo[sub].min(), clo)
+                or not np.isclose(hi[sub].max(), chi)
+                or not np.isclose(width[sub].sum(), chi - clo)):
+            raise SystemExit(f"coarse bin {clo:g}-{chi:g} is not tiled by the fine bins")
+        f, e = flux[..., sub], err[..., sub]
+        ok = np.isfinite(f) & (f > 0) & np.isfinite(e)
+        ww = np.where(ok, width[sub], 0.0)
+        tot = ww.sum(axis=-1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out_f[..., k] = np.where(tot > 0, (ww * np.where(ok, f, 0.0)).sum(axis=-1) / tot,
+                                     np.nan)
+            out_e[..., k] = np.where(
+                tot > 0, np.sqrt(((ww * np.where(ok, e, 0.0)) ** 2).sum(axis=-1)) / tot, np.nan)
+    return out_f, out_e
 
 
 def read_positron_root(path: Path):
@@ -233,6 +356,25 @@ def build_parser():
                         help="positron exposure time (for --avg-window)")
     parser.add_argument("--exposure-prefix", default="h1t/sf1/h1exp_igrf_T_fov25_sf1_ene")
     parser.add_argument(
+        "--pos-label", choices=("posflux", "ams"), default="posflux",
+        help="positron label: 'posflux' = posflux.root (default); 'ams' = the AMS "
+             "published daily positrons (--ams-positron-csv, 12 bins, stat / time-dep "
+             "/ total syst as published). Window merges use the hexps-pos.root "
+             "exposure (fine-bin exposures combined per AMS bin)")
+    parser.add_argument(
+        "--pos-bins", choices=("posflux", "ams"), default="posflux",
+        help="positron label bins: 'posflux' = the 27 posflux.root bins (default, old "
+             "behaviour); 'ams' = merged into the 12 AMS published bins (width-weighted "
+             "mean over the sub-bins with a value, stat errors in quadrature)")
+    parser.add_argument(
+        "--pos-syst", choices=("none", "daily", "total"), default="none",
+        help="add a systematic error to the positron error: rel. syst (AMS published "
+             "ratio of the bin, constant in time) x flux, in quadrature with the stat "
+             "error; 'daily' = time-dependent part, 'total' = total syst. Used by the "
+             "loss weight, chi^2 and error plots. Default none (stat only)")
+    parser.add_argument("--ams-positron-csv", type=Path, default=dp.AMS_POSITRON_PUB21_CSV,
+                        help="AMS published daily positrons (bins and syst ratios)")
+    parser.add_argument(
         "--loss-weight", choices=("none", "err"), default="none",
         help="'none' = plain MSE (default, old behaviour); 'err' = chi^2-like "
              "weight per (day, bin) from the posflux.root error, as nmdb_n2p.py "
@@ -297,6 +439,42 @@ def main() -> int:
     print(f"proton input : {p_dates[0]} .. {p_dates[-1]}  bins={len(p_bins)}")
     print(f"positron     : {e_dates[0]} .. {e_dates[-1]}  bins={len(e_bins)} "
           f"({e_bins[0][0]:g}-{e_bins[-1][1]:g} GeV)")
+    # --pos-bins ams: merge the posflux bins into the AMS published bins;
+    # --pos-syst: AMS relative syst of the bin (constant) x flux
+    f27, e27, bins27 = e_flux, e_err, e_bins
+    syst_rel = None
+    e_sys = None                  # --pos-label ams: published syst column (daily)
+    pos_label = {"source": "posflux", "bins": args.pos_bins, "syst": args.pos_syst}
+    if args.pos_bins == "ams" or args.pos_syst != "none" or args.pos_label == "ams":
+        pub_bins, pub_td, pub_tot = read_ams_positron_syst(args.ams_positron_csv)
+        pos_label["ams_csv"] = str(args.ams_positron_csv)
+    if args.pos_label == "ams":
+        # AMS published daily positrons as the label (stat error column; syst via
+        # --pos-syst from the published ratios)
+        e_dates, e_flux, e_err, _td, _tot, e_bins = read_ams_positron_daily(
+            args.ams_positron_csv)
+        pos_label.update(source="ams_published", bins="ams")
+        if args.pos_syst != "none":
+            # error = published stat (+) published syst column, read as is
+            e_sys = _td if args.pos_syst == "daily" else _tot
+            pos_label["syst_from"] = ("csv column flux_error_timedependent" if
+                                      args.pos_syst == "daily" else
+                                      "csv column flux_error_systematic_total")
+        print(f"positron label: AMS published {e_dates[0]} .. {e_dates[-1]}, "
+              f"{len(e_bins)} bins, {int(np.isfinite(e_flux).all(axis=1).sum())} complete days")
+    elif args.pos_bins == "ams":
+        e_flux, e_err = rebin_positron(f27, e27, bins27, pub_bins)
+        e_bins = [tuple(b) for b in pub_bins]
+        pos_label["fine_bins_GeV"] = bins27
+        print(f"positron bins: {len(bins27)} posflux bins merged into {len(e_bins)} AMS "
+              "published bins (width-weighted mean of the sub-bins with a value)")
+    if args.pos_syst != "none":
+        own = containing_bins(e_bins, pub_bins)
+        syst_rel = (pub_td if args.pos_syst == "daily" else pub_tot)[own]
+        pos_label["syst_rel_timedep"] = pub_td[own].tolist()
+        pos_label["syst_rel_total"] = pub_tot[own].tolist()
+        print(f"positron syst: {args.pos_syst}, rel. syst per bin "
+              + " ".join(f"{x * 100:.1f}%" for x in syst_rel))
 
     # training days: every positron bin measured, and inside the proton range;
     # with --train-range ams also inside the AMS PRL range (no extrapolated input)
@@ -322,6 +500,7 @@ def main() -> int:
         X_raw = p_flux[pro_rows]
         y_raw = e_flux[pos_rows]
         y_err = e_err[pos_rows]
+        y_sys = None if e_sys is None else e_sys[pos_rows]
         day = np.asarray([e_dates[k] for k in pos_rows])
         meas_frac = p_measured[pro_rows].mean(axis=1)              # 1 = all bins AMS
         oor = p_oor[pro_rows]
@@ -329,11 +508,28 @@ def main() -> int:
     else:
         import nmdb_aggregate as agg
         length = agg.SCALES[args.avg_window]
-        expo = read_positron_exposure(args.exposure_root, args.exposure_prefix,
-                                      e_dates, e_bins)
-        win = build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
-                                p_measured, p_oor, allowed)
+        if args.pos_label == "ams":
+            expo = coarse_exposure(args.exposure_root, args.exposure_prefix, e_dates,
+                                   e_bins, bins27, f27)
+            win = build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
+                                    p_measured, p_oor, allowed, sys=e_sys)
+        elif args.pos_bins == "ams":
+            # windows on the fine posflux bins (exposure per fine bin), then merge
+            expo = read_positron_exposure(args.exposure_root, args.exposure_prefix,
+                                          e_dates, bins27)
+            win = build_avg_windows(length, e_dates, f27, e27, expo, p_dates, p_flux,
+                                    p_measured, p_oor, allowed, complete=False)
+            win["y"], win["err"] = rebin_positron(win["y"], win["err"], bins27, e_bins)
+            keep = np.isfinite(win["y"]).all(axis=1) & np.isfinite(win["err"]).all(axis=1)
+            for key in ("start", "end", "x", "y", "err", "n_days", "meas", "oor"):
+                win[key] = win[key][keep]
+        else:
+            expo = read_positron_exposure(args.exposure_root, args.exposure_prefix,
+                                          e_dates, e_bins)
+            win = build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
+                                    p_measured, p_oor, allowed)
         X_raw, y_raw, y_err = win["x"], win["y"], win["err"]
+        y_sys = win.get("sys")
         day = win["start"]                       # a window is dated by its first day
         meas_frac, oor = win["meas"], win["oor"]
         first_day, last_day = win["first_day"], win["last_day"]
@@ -341,6 +537,10 @@ def main() -> int:
               f"windows of {win['n_windows_with_data']} with data; label days "
               f"{first_day} .. {last_day}; days per window median "
               f"{np.median(win['n_days']):g}")
+    if y_sys is not None:         # --pos-label ams: published syst column
+        y_err = np.sqrt(y_err ** 2 + y_sys ** 2)
+    elif syst_rel is not None:    # after any time merge: syst does not average down
+        y_err = np.sqrt(y_err ** 2 + (syst_rel[None, :] * y_raw) ** 2)
     n_days, n_in = X_raw.shape
     n_out = y_raw.shape[1]
     print(f"aligned {'windows' if win is not None else 'days'}={n_days}  "
@@ -421,7 +621,10 @@ def main() -> int:
     tag = (f"seed{args.data_seed}_p{n_in}e{n_out}_{args.epochs}ep_lr{args.lr}"
            f"_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
            + ("_werr" if use_w else "")
-           + ("" if win is None else f"_avg{args.avg_window}"))
+           + ("" if win is None else f"_avg{args.avg_window}")
+           + ("_amslabel" if args.pos_label == "ams" else
+              "_ams12" if args.pos_bins == "ams" else "")
+           + ("" if syst_rel is None else f"_sys{args.pos_syst}"))
     ckpt = model_dir / f"{tag}_best.pt"
     np.savez(model_dir / "scalers.npz",
              x_data_min=scaler_x.data_min_, x_data_max=scaler_x.data_max_,
@@ -576,6 +779,7 @@ def main() -> int:
         "proton_input_rule": "AMS measured where available (per day and bin), "
                              "n2p prediction elsewhere",
         "positron_target": str(args.positron_root),
+        "positron_label": pos_label,
         "positron_bins_GeV": e_bins, "proton_bins_GV": p_bins,
         "aligned_days": int(n_days),
         "aligned_range": [first_day.isoformat(), last_day.isoformat()],
@@ -606,7 +810,12 @@ def main() -> int:
         # with --loss-weight err the losses (and best_val_loss) are chi^2 / c,
         # not comparable to plain-MSE runs; compare the metrics instead
         "loss_weight": None if not use_w else {
-            "type": "err", "error": "posflux.root hflux_2d errors / flux",
+            "type": "err",
+            "error": (("AMS published stat error" if args.pos_label == "ams" else
+                       "posflux.root stat error") + ("" if syst_rel is None else
+                      f" (+) {args.pos_syst} syst (" + ("AMS published csv column"
+                      if e_sys is not None else "AMS published ratio x flux") + ")")
+                      + " / flux" + (", AMS bins" if args.pos_bins == "ams" else "")),
             "formula": "w = (R_k*ln10/eps_ik)^2 / c, c = train mean",
             "c": loss_weight_c, "n_eps_filled": n_eps_filled},
         "batch_size": args.batch_size, "learning_rate": args.lr, "l2": args.l2,
