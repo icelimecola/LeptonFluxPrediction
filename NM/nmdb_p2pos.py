@@ -5,7 +5,7 @@ Input  X : daily proton flux, 30 rigidity bins, 2001-2026, from
            nmdb_n2p_extend.py (data/nmdb_n2p_extend_<G>/proton_extend_meta.npz).
            Spliced per (day, bin): the AMS measurement where it exists
            (flux_ams), otherwise the n2p prediction (flux_pred).
-Target y : AMS daily positron flux from rawdata/flux/posflux.root (hflux_2d),
+Target y : AMS daily positron flux from data/lepton/sdiat/cguan/posflux.root (hflux_2d),
            processed like POS/step2/dataproc_fluxpos.py -- first and last
            energy bins dropped (27 bins, 1.0-41.9 GeV), all-zero head/tail
            days trimmed, remaining zeros = missing -- but NOT interpolated:
@@ -21,6 +21,16 @@ weights restored. The convolution runs along the proton rigidity axis.
 posflux.root (error / flux), R_k = max - min of log10 flux on the train rows,
 c = mean of the raw weight over the train split. Val/test losses are weighted
 the same way (early stopping consistent). Default 'none' = plain MSE.
+
+--avg-window 3day|br: train on time-averaged windows instead of days. Windows
+are those of nmdb_aggregate.py (aligned to BR 2426 = 2011-05-15, consecutive,
+non-overlapping). Label = exposure-weighted window mean of the positron flux
+(hexps-pos.root), error combined the same way; input = equal-weight mean of the
+proton input over the window days that have a positron value; only windows with
+every bin filled are used; split random by window. After training the model is
+also run on every daily proton input of the training range ->
+Error/<tag>_daily_pred.npz (dates, pred, daily obs, err); daily metrics in the
+summary include days of the training windows (reference only).
 
 Zhao et al. 2026 five metrics (R2 / MAE / MPE / RMSE / chi2dof) per split and
 for all days, via nmdb_n2p.paper_metrics_by_split; sigma = the posflux.root
@@ -50,6 +60,10 @@ from pathlib import Path
 import numpy as np
 
 import nmdb_n2p as n2p
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # LeptonFluxPrediction/
+import datapaths as dp  # noqa: E402  原始数据路径统一在 datapaths.py
 
 BASE = Path(__file__).resolve().parent            # .../LeptonFluxPrediction/NM
 DEFAULT_GROUP = "lowrc9lj"
@@ -85,6 +99,62 @@ def read_proton_period(meta_path: Path):
     inside the AMS PRL range (n2p interpolation), 0 = outside (extrapolation)."""
     with np.load(meta_path) as meta:
         return np.asarray(meta["period"]) if "period" in meta.files else None
+
+
+def read_positron_exposure(path: Path, prefix: str, dates, bins):
+    """Daily exposure time per energy bin on ``dates`` (0 = none), from
+    hexps-pos.root <prefix><lo>to<hi>GeV, as nmdb_aggregate.py."""
+    import uproot
+    import nmdb_aggregate as agg
+    hexp = uproot.open(path)
+    expo = np.zeros((len(dates), len(bins)))
+    for j, (lo, hi) in enumerate(bins):
+        h = hexp[f"{prefix}{lo:g}to{hi:g}GeV"]
+        lk = {d: i for i, d in enumerate(agg.day_starts(h.axes[0].edges()))}
+        vals = np.asarray(h.values(), dtype=np.float64)
+        expo[:, j] = [vals[lk[d]] if d in lk else 0.0 for d in dates]
+    return expo
+
+
+def build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
+                      p_measured, p_oor, allowed):
+    """Window samples as nmdb_aggregate.aggregate (see --avg-window)."""
+    import nmdb_aggregate as agg
+    lookup = {d: i for i, d in enumerate(p_dates)}
+    in_range = np.asarray([d in lookup and bool(allowed[lookup[d]]) for d in e_dates])
+    has = np.isfinite(e_flux) & (e_flux > 0) & (expo > 0) & in_range[:, None]
+    day_any = has.any(axis=1)
+    days_with = [d for d, h in zip(e_dates, day_any) if h]
+    if not days_with:
+        raise SystemExit("no positron day inside the proton training range")
+    flux_m = np.where(has, e_flux, np.nan)
+    e_lookup = {d: i for i, d in enumerate(e_dates)}
+    rec = {k: [] for k in ("start", "end", "x", "y", "err", "n_days", "meas", "oor")}
+    used_days = []
+    n_all = 0
+    for w in agg.make_windows(days_with[0], days_with[-1], length):
+        rows = agg.window_rows(w, e_lookup)
+        rows = rows[day_any[rows]] if rows.size else rows
+        if not rows.size:
+            continue
+        n_all += 1
+        f, sig, _tot, _n = agg.exposure_mean(flux_m, e_err, expo, rows)
+        if not (np.isfinite(f).all() and np.isfinite(sig).all()):
+            continue                                   # every bin needs a value
+        p_rows = np.asarray([lookup[e_dates[i]] for i in rows])
+        rec["start"].append(w["start"])
+        rec["end"].append(w["end"])
+        rec["x"].append(p_flux[p_rows].mean(axis=0))   # equal weight, linear flux
+        rec["y"].append(f)
+        rec["err"].append(sig)
+        rec["n_days"].append(len(rows))
+        rec["meas"].append(p_measured[p_rows].mean())
+        rec["oor"].append(bool(p_oor[p_rows].any()))
+        used_days.extend(e_dates[i] for i in rows)
+    out = {k: np.asarray(v) for k, v in rec.items()}
+    out["n_windows_with_data"] = n_all
+    out["first_day"], out["last_day"] = min(used_days), max(used_days)
+    return out
 
 
 def read_positron_root(path: Path):
@@ -128,7 +198,7 @@ def build_parser():
                         help="proton_extend_meta.npz (default: "
                              "data/nmdb_n2p_extend_<group>/proton_extend_meta.npz)")
     parser.add_argument("--positron-root", type=Path,
-                        default=BASE.parent / "rawdata" / "flux" / "posflux.root")
+                        default=dp.POSFLUX_ROOT)
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="default: data/nmdb_p2pos_<group>/seed<data-seed>")
     parser.add_argument("--data-seed", type=int, default=1)
@@ -152,6 +222,16 @@ def build_parser():
              "range of the proton input (period 1/2: PRL measured where present, n2p "
              "interpolation in the gaps); 'all' = every aligned positron day, incl. "
              "n2p extrapolation after the PRL range (old behaviour)")
+    parser.add_argument(
+        "--avg-window", choices=("none", "3day", "br"), default="none",
+        help="'none' = daily samples (default, old behaviour); '3day' / 'br' = "
+             "train on non-overlapping 3-day / 27-day windows of nmdb_aggregate.py: "
+             "exposure-weighted positron label, equal-weight proton input; the "
+             "trained model is then also run on every daily input")
+    parser.add_argument("--exposure-root", type=Path,
+                        default=dp.HEXPS_POS_ROOT,
+                        help="positron exposure time (for --avg-window)")
+    parser.add_argument("--exposure-prefix", default="h1t/sf1/h1exp_igrf_T_fov25_sf1_ene")
     parser.add_argument(
         "--loss-weight", choices=("none", "err"), default="none",
         help="'none' = plain MSE (default, old behaviour); 'err' = chi^2-like "
@@ -231,21 +311,40 @@ def main() -> int:
         inside = [p_dates[i] for i in np.where(allowed)[0]]
         print(f"train range  : AMS PRL range {inside[0]} .. {inside[-1]} "
               f"({int((period == 1).sum())} measured + {int((period == 2).sum())} gap days)")
-    pos_rows = [k for k, d in enumerate(e_dates)
-                if complete[k] and d in lookup and allowed[lookup[d]]]
-    if not pos_rows:
-        raise SystemExit("no complete positron day inside the proton range")
-    pro_rows = np.asarray([lookup[e_dates[k]] for k in pos_rows])
-    pos_rows = np.asarray(pos_rows)
-    X_raw = p_flux[pro_rows]
-    y_raw = e_flux[pos_rows]
-    y_err = e_err[pos_rows]
-    day = np.asarray([e_dates[k] for k in pos_rows])
-    meas_frac = p_measured[pro_rows].mean(axis=1)              # 1 = all bins AMS
-    oor = p_oor[pro_rows]
+    win = None
+    if args.avg_window == "none":
+        pos_rows = [k for k, d in enumerate(e_dates)
+                    if complete[k] and d in lookup and allowed[lookup[d]]]
+        if not pos_rows:
+            raise SystemExit("no complete positron day inside the proton range")
+        pro_rows = np.asarray([lookup[e_dates[k]] for k in pos_rows])
+        pos_rows = np.asarray(pos_rows)
+        X_raw = p_flux[pro_rows]
+        y_raw = e_flux[pos_rows]
+        y_err = e_err[pos_rows]
+        day = np.asarray([e_dates[k] for k in pos_rows])
+        meas_frac = p_measured[pro_rows].mean(axis=1)              # 1 = all bins AMS
+        oor = p_oor[pro_rows]
+        first_day, last_day = day[0], day[-1]
+    else:
+        import nmdb_aggregate as agg
+        length = agg.SCALES[args.avg_window]
+        expo = read_positron_exposure(args.exposure_root, args.exposure_prefix,
+                                      e_dates, e_bins)
+        win = build_avg_windows(length, e_dates, e_flux, e_err, expo, p_dates, p_flux,
+                                p_measured, p_oor, allowed)
+        X_raw, y_raw, y_err = win["x"], win["y"], win["err"]
+        day = win["start"]                       # a window is dated by its first day
+        meas_frac, oor = win["meas"], win["oor"]
+        first_day, last_day = win["first_day"], win["last_day"]
+        print(f"avg window   : {args.avg_window} ({length} days), {len(day)} complete "
+              f"windows of {win['n_windows_with_data']} with data; label days "
+              f"{first_day} .. {last_day}; days per window median "
+              f"{np.median(win['n_days']):g}")
     n_days, n_in = X_raw.shape
     n_out = y_raw.shape[1]
-    print(f"aligned days={n_days}  proton bins={n_in}  positron bins={n_out}")
+    print(f"aligned {'windows' if win is not None else 'days'}={n_days}  "
+          f"proton bins={n_in}  positron bins={n_out}")
     print(f"  proton input fully measured on {int((meas_frac == 1).sum())} days, "
           f"fully predicted on {int((meas_frac == 0).sum())}, mixed on "
           f"{int(((meas_frac > 0) & (meas_frac < 1)).sum())}")
@@ -321,7 +420,8 @@ def main() -> int:
         path.mkdir(parents=True, exist_ok=True)
     tag = (f"seed{args.data_seed}_p{n_in}e{n_out}_{args.epochs}ep_lr{args.lr}"
            f"_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
-           + ("_werr" if use_w else ""))
+           + ("_werr" if use_w else "")
+           + ("" if win is None else f"_avg{args.avg_window}"))
     ckpt = model_dir / f"{tag}_best.pt"
     np.savez(model_dir / "scalers.npz",
              x_data_min=scaler_x.data_min_, x_data_max=scaler_x.data_max_,
@@ -399,7 +499,48 @@ def main() -> int:
              # for nmdb_n2p_replot_relerr.py: redraw without retraining
              positron_rel_err=y_err[test_idx] / y_raw[test_idx],
              energy_min=np.asarray([b[0] for b in e_bins]),
-             energy_max=np.asarray([b[1] for b in e_bins]))
+             energy_max=np.asarray([b[1] for b in e_bins]),
+             # --avg-window: the window inputs, so nmdb_aggregate.py's self-check
+             # can re-predict the test windows (absent for daily runs)
+             **({} if win is None else {
+                 "window_end": np.asarray([d.isoformat() for d in win["end"][test_idx]]),
+                 "window_n_days": win["n_days"][test_idx],
+                 "input_mean": X_raw[test_idx]}))
+
+    # --avg-window: run the window-trained model on every daily input of the range
+    daily = None
+    if win is not None:
+        d_rows = np.asarray([i for i, d in enumerate(p_dates)
+                             if allowed[i] and first_day <= d <= last_day])
+        Xd = scaler_x.transform(np.log10(p_flux[d_rows]))[..., None]
+        pred_d = n2p.predict_flux(model, Xd, scaler_y, device)
+        e_lookup = {d: k for k, d in enumerate(e_dates)}
+        obs_d = np.full_like(pred_d, np.nan)
+        err_d = np.full_like(pred_d, np.nan)
+        for r, i in enumerate(d_rows):
+            k = e_lookup.get(p_dates[i])
+            if k is not None:
+                obs_d[r], err_d[r] = e_flux[k], e_err[k]
+        np.savez(err_dir / f"{tag}_daily_pred.npz",
+                 dates=np.asarray([p_dates[i].isoformat() for i in d_rows]),
+                 pred=pred_d, obs=obs_d, obs_err=err_d,
+                 energy_min=np.asarray([b[0] for b in e_bins]),
+                 energy_max=np.asarray([b[1] for b in e_bins]))
+        full = np.isfinite(obs_d).all(axis=1)
+        rel_d = pred_d[full] / obs_d[full] - 1.0
+        daily = {
+            "note": "window-trained model on daily inputs vs daily posflux.root; "
+                    "includes days of the training windows -> reference only",
+            "n_days_predicted": int(len(d_rows)), "n_days_complete_obs": int(full.sum()),
+            "mean_abs_relative_error": float(np.mean(np.abs(rel_d))),
+            "mean_signed_relative_error": float(np.mean(rel_d)),
+            "per_bin_mean_abs_relative_error": np.mean(np.abs(rel_d), axis=0).tolist(),
+            "per_bin_sum_pred_over_sum_obs_minus_1":
+                (pred_d[full].sum(axis=0) / obs_d[full].sum(axis=0) - 1.0).tolist(),
+        }
+        print(f"daily (window model, all {int(full.sum())} complete days): MRE "
+              f"{daily['mean_abs_relative_error'] * 100:.2f}%  signed "
+              f"{daily['mean_signed_relative_error'] * 100:+.2f}%")
 
     plot_paths, ts_paths = [], []
     if not args.no_plots:
@@ -437,7 +578,16 @@ def main() -> int:
         "positron_target": str(args.positron_root),
         "positron_bins_GeV": e_bins, "proton_bins_GV": p_bins,
         "aligned_days": int(n_days),
-        "aligned_range": [day[0].isoformat(), day[-1].isoformat()],
+        "aligned_range": [first_day.isoformat(), last_day.isoformat()],
+        "avg_window": None if win is None else {
+            "scale": args.avg_window, "length_days": int(agg.SCALES[args.avg_window]),
+            "n_windows": int(n_days), "n_windows_with_data": int(win["n_windows_with_data"]),
+            "label": "exposure-weighted window mean (hexps-pos.root), "
+                     "err sqrt(sum((T e)^2))/sum(T)",
+            "input": "equal-weight mean of the proton input over the window days "
+                     "with a positron value",
+            "exposure": str(args.exposure_root),
+            "daily_prediction": daily},
         "proton_input_fully_measured_days": int((meas_frac == 1).sum()),
         "proton_input_fully_predicted_days": int((meas_frac == 0).sum()),
         "proton_input_out_of_range_days": int(oor.sum()),
