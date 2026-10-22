@@ -16,6 +16,16 @@ rows, random 80/10/10 split by --data-seed, Adamax, MSE + Keras-style L2 on
 the output kernel, Keras BatchNorm defaults, early stopping on val loss, best
 weights restored. The convolution runs along the proton rigidity axis.
 
+--loss-weight err (as nmdb_n2p.py --loss-weight ams): chi^2-like weight per
+(day, bin), w = (R_k ln10 / eps_ik)^2 / c, eps = positron relative error from
+posflux.root (error / flux), R_k = max - min of log10 flux on the train rows,
+c = mean of the raw weight over the train split. Val/test losses are weighted
+the same way (early stopping consistent). Default 'none' = plain MSE.
+
+Zhao et al. 2026 five metrics (R2 / MAE / MPE / RMSE / chi2dof) per split and
+for all days, via nmdb_n2p.paper_metrics_by_split; sigma = the posflux.root
+error (only one error column, stored under chi2dof_total; chi2dof_daily empty).
+
 Outputs under --output-dir (default data/nmdb_p2pos_<G>/seed<N>/):
   Model/<tag>_best.pt, Model/scalers.npz
   Error/<tag>_{train,val,test}_{true,pred}_flux.npy, _rel_error.npy,
@@ -26,7 +36,7 @@ Outputs under --output-dir (default data/nmdb_p2pos_<G>/seed<N>/):
                mean +- std of pred/obs - 1, lower relative-uncertainty panel
   Error/<tag>_test_meta.npz also keeps the test-day positron relative error and
                the energy bins, so nmdb_n2p_replot_relerr.py can redraw it
-  p2pos_summary.json
+  p2pos_summary.json, paper_metrics.{json,csv}
 """
 
 from __future__ import annotations
@@ -143,6 +153,12 @@ def build_parser():
              "interpolation in the gaps); 'all' = every aligned positron day, incl. "
              "n2p extrapolation after the PRL range (old behaviour)")
     parser.add_argument(
+        "--loss-weight", choices=("none", "err"), default="none",
+        help="'none' = plain MSE (default, old behaviour); 'err' = chi^2-like "
+             "weight per (day, bin) from the posflux.root error, as nmdb_n2p.py "
+             "--loss-weight ams: w = (R_k ln10 / eps_ik)^2 / c, eps = err/flux, "
+             "c = mean of the raw weight over the train split")
+    parser.add_argument(
         "--init", choices=("keras", "torch"), default="keras",
         help="weight init, as nmdb_n2p.py: 'keras' = glorot_uniform + zero bias "
              "(default); 'torch' = PyTorch default")
@@ -250,6 +266,30 @@ def main() -> int:
         sets[name] = (scaler_x.transform(X_log[idx])[..., None],
                       scaler_y.transform(y_log[idx]), idx)
 
+    # optional chi^2-like loss weight (same formula as nmdb_n2p.py --loss-weight ams):
+    # w~_ik = (R_k ln10 / eps_ik)^2, w = w~ / c, c = mean of w~ on the train rows,
+    # so w * (yhat - y)^2 = ((ln phat - ln p) / eps)^2 / c on the MinMax(log10) target
+    use_w = args.loss_weight == "err"
+    loss_weight_c, n_eps_filled = None, 0
+    if use_w:
+        eps = y_err / y_raw
+        bad = ~np.isfinite(eps) | (eps <= 0)
+        n_eps_filled = int(bad.sum())
+        if n_eps_filled:
+            med = np.nanmedian(np.where(bad, np.nan, eps), axis=0)
+            eps = np.where(bad, med[None, :], eps)
+            print(f"positron error: {n_eps_filled} missing/non-positive values "
+                  "filled with bin median")
+        R = scaler_y.data_max_ - scaler_y.data_min_
+        w_raw = (R[None, :] * np.log(10.0) / eps) ** 2
+        loss_weight_c = float(np.mean(w_raw[train_idx]))
+        w_all = w_raw / loss_weight_c
+        print(f"loss weight: err (posflux.root), c = {loss_weight_c:.6g}; per-bin mean "
+              f"w (train): bin1 {w_all[train_idx, 0].mean():.3g}, "
+              f"bin{n_out} {w_all[train_idx, -1].mean():.3g}")
+    else:
+        w_all = np.ones_like(y_log)
+
     model, kernels = n2p.build_model(n_in, n_out, args.dropout, init=args.init)
     model.to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -258,25 +298,30 @@ def main() -> int:
                                    betas=(0.9, 0.999), eps=1e-7)
     mse = torch.nn.MSELoss()
 
-    def criterion(pred, target):   # Keras L2(l2) on the output kernel only
-        return mse(pred, target) + args.l2 * torch.sum(model.head.weight ** 2)
+    def criterion(pred, target, weight=None):   # Keras L2(l2) on the output kernel only
+        data = mse(pred, target) if weight is None else torch.mean(weight * (pred - target) ** 2)
+        return data + args.l2 * torch.sum(model.head.weight ** 2)
 
     def tensor(a):
         return torch.as_tensor(a, dtype=torch.float32, device=device)
 
     Xv, yv = tensor(sets["val"][0]), tensor(sets["val"][1])
     Xt, yt = tensor(sets["test"][0]), tensor(sets["test"][1])
+    wv = tensor(w_all[val_idx]) if use_w else None
+    wt = tensor(w_all[test_idx]) if use_w else None
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(
             torch.as_tensor(sets["train"][0], dtype=torch.float32),
-            torch.as_tensor(sets["train"][1], dtype=torch.float32)),
+            torch.as_tensor(sets["train"][1], dtype=torch.float32),
+            torch.as_tensor(w_all[train_idx], dtype=torch.float32)),
         batch_size=args.batch_size, shuffle=True, drop_last=args.drop_last)
 
     model_dir, fig_dir, err_dir = out_dir / "Model", out_dir / "Figure", out_dir / "Error"
     for path in (model_dir, fig_dir, err_dir):
         path.mkdir(parents=True, exist_ok=True)
     tag = (f"seed{args.data_seed}_p{n_in}e{n_out}_{args.epochs}ep_lr{args.lr}"
-           f"_l2{args.l2}_do{args.dropout}_b{args.batch_size}")
+           f"_l2{args.l2}_do{args.dropout}_b{args.batch_size}"
+           + ("_werr" if use_w else ""))
     ckpt = model_dir / f"{tag}_best.pt"
     np.savez(model_dir / "scalers.npz",
              x_data_min=scaler_x.data_min_, x_data_max=scaler_x.data_max_,
@@ -288,17 +333,17 @@ def main() -> int:
     for epoch in range(1, args.epochs + 1):
         model.train()
         batch = []
-        for xb, yb in loader:
+        for xb, yb, wb in loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            loss = criterion(model(xb), yb, wb.to(device) if use_w else None)
             loss.backward()
             optimizer.step()
             batch.append(float(loss.item()))
         model.eval()
         with torch.no_grad():
-            val_loss = float(criterion(model(Xv), yv).item())
-            test_loss = float(criterion(model(Xt), yt).item())
+            val_loss = float(criterion(model(Xv), yv, wv).item())
+            test_loss = float(criterion(model(Xt), yt, wt).item())
         train_losses.append(float(np.mean(batch)))
         val_losses.append(val_loss)
         test_losses.append(test_loss)
@@ -339,6 +384,14 @@ def main() -> int:
         }
         print(name, f"MRE {metrics[name]['mean_abs_relative_error'] * 100:.3f}%  "
               f"signed {metrics[name]['mean_signed_relative_error'] * 100:+.3f}%")
+    # Zhao et al. 2026 five metrics; sigma = posflux.root error (one column ->
+    # chi2dof_total; chi2dof_daily stays empty)
+    paper = n2p.paper_metrics_by_split(
+        true_by, pred_by, {"train": train_idx, "val": val_idx, "test": test_idx},
+        y_err, None)
+    n2p.write_paper_metrics(out_dir, paper)
+    for name in n2p.PAPER_METRIC_SPLITS:
+        print("paper", name, json.dumps(paper[name]))
     np.savez(err_dir / f"{tag}_test_meta.npz",
              dates=np.asarray([d.isoformat() for d in day[test_idx]]),
              proton_measured_fraction=meas_frac[test_idx],
@@ -400,10 +453,18 @@ def main() -> int:
                        "the gaps" if args.train_range == "ams" else
                        "all aligned days (AMS-measured proton where available, "
                        "n2p prediction elsewhere, incl. out-of-range inputs)"),
+        # with --loss-weight err the losses (and best_val_loss) are chi^2 / c,
+        # not comparable to plain-MSE runs; compare the metrics instead
+        "loss_weight": None if not use_w else {
+            "type": "err", "error": "posflux.root hflux_2d errors / flux",
+            "formula": "w = (R_k*ln10/eps_ik)^2 / c, c = train mean",
+            "c": loss_weight_c, "n_eps_filled": n_eps_filled},
         "batch_size": args.batch_size, "learning_rate": args.lr, "l2": args.l2,
         "dropout": args.dropout, "test_frac": args.test_frac, "val_frac": args.val_frac,
         "early_stopping": {"patience": args.patience, "min_delta": args.min_delta},
         "metrics": metrics,
+        # chi2dof_total here uses the posflux.root error (no daily/total split)
+        "paper_metrics": paper,
         "outputs": {"checkpoint": str(ckpt), "scalers": str(model_dir / "scalers.npz"),
                     "figure_dir": str(fig_dir), "error_dir": str(err_dir),
                     "plots": plot_paths, "timeseries_plots": ts_paths},
