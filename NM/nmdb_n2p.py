@@ -426,8 +426,11 @@ def make_plots(out_dir, train_losses, val_losses, test_losses, y_true, y_pred, b
 # --------------------------------------------------------------------------
 def make_timeseries_plots(
     indiv_dir, combined_dir, date_splits, true_by_split, pred_by_split, bins,
-    group_size=6,
+    group_size=6, err_by_split=None, err_label="error",
 ):
+    """... err_by_split (optional, same layout as true_by_split): absolute
+    errors of the observed values, drawn as error bars on the observed-only
+    figures (combined_observed_group_*.pdf); None = no error bars."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -439,13 +442,17 @@ def make_timeseries_plots(
         dates = date_splits[label]
         truth = true_by_split[label]
         pred = pred_by_split[label]
+        errs = err_by_split[label] if err_by_split is not None else None
         for k in range(len(dates)):
-            records.append((dates[k], truth[k], pred[k], label))
+            records.append((dates[k], truth[k], pred[k], label,
+                            errs[k] if errs is not None else None))
     records.sort(key=lambda row: row[0])
     dates = [row[0] for row in records]
     obs = np.asarray([row[1] for row in records])
     prd = np.asarray([row[2] for row in records])
     split_of = np.asarray([row[3] for row in records])
+    obs_err = (np.asarray([row[4] for row in records]) if err_by_split is not None
+               else None)
 
     # observed (measured) flux is drawn in red so it stands out; the predicted
     # test split therefore uses green instead of the old red
@@ -540,24 +547,61 @@ def make_timeseries_plots(
         paths.append(str(path))
 
     # observed only: the measured AMS flux alone, same 6-bins-per-figure grouping
+    paths += plot_observed_groups(combined_dir, dates, obs, bins, obs_err=obs_err,
+                                  err_label=err_label, group_size=group_size)
+    return paths
+
+
+def plot_observed_groups(out_dir, dates, obs, bins, obs_err=None, err_label="error",
+                         group_size=6, suffix=""):
+    """Label-only figures combined_observed_group_<N><suffix>.pdf: the observed
+    flux over time, 6 bins per 3x2 figure, red points; with obs_err (absolute,
+    same shape as obs) as thin error bars. Used by make_timeseries_plots and
+    nmdb_n2p_replot_label.py."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    obs_color = "#d62728"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    obs = np.asarray(obs)
+    paths: list[str] = []
+    n_bins = obs.shape[1]
     for group_start in range(0, n_bins, group_size):
         group = list(range(group_start, min(group_start + group_size, n_bins)))
         group_number = group_start // group_size + 1
         figure, axes = plt.subplots(3, 2, figsize=(16.0, 11.0), squeeze=False)
         for index, j in enumerate(group):
             axis = axes[index // 2, index % 2]
-            axis.plot(dates, obs[:, j], linestyle="none", marker=".",
-                      markersize=2.6, color=obs_color, markeredgewidth=0)
-            style_axis(axis, combined=True)
-            bin_label(axis, j, combined=True)
+            if obs_err is not None:
+                axis.errorbar(dates, obs[:, j], yerr=np.asarray(obs_err)[:, j], fmt=".",
+                              markersize=2.6, color=obs_color, markeredgewidth=0,
+                              ecolor=obs_color, elinewidth=0.35, alpha=0.6, capsize=0)
+            else:
+                axis.plot(dates, obs[:, j], linestyle="none", marker=".",
+                          markersize=2.6, color=obs_color, markeredgewidth=0)
+            axis.set_yscale("log")
+            axis.set_xlim(dates[0], dates[-1])
+            axis.set_ylabel(_flux_label(), fontsize=9)
+            axis.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=4, maxticks=7))
+            axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+            axis.tick_params(direction="in", top=True, right=True, labelsize=8)
+            axis.text(0.02, 0.94,
+                      f"bin {j + 1}: {bins[j][0]:g}-{bins[j][1]:g} {PLOT_LABELS['unit']}",
+                      transform=axis.transAxes, ha="left", va="top", fontsize=11,
+                      fontweight="bold")
         for index in range(len(group), group_size):
             axes[index // 2, index % 2].set_visible(False)
         figure.suptitle(
-            f"AMS Data: {PLOT_LABELS['particle']} flux (bins {group[0] + 1}-{group[-1] + 1})",
+            f"AMS Data: {PLOT_LABELS['particle']} flux (bins {group[0] + 1}-{group[-1] + 1})"
+            + ("" if obs_err is None else f"   error: {err_label}"),
             fontsize=15, fontweight="bold",
         )
         figure.tight_layout(rect=(0, 0, 1, 0.95))
-        path = combined_dir / f"combined_observed_group_{group_number}.pdf"
+        path = out_dir / f"combined_observed_group_{group_number}{suffix}.pdf"
         figure.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(figure)
         paths.append(str(path))
@@ -678,8 +722,8 @@ def match_proton_rows(meta_path: Path, flux_rows: np.ndarray) -> np.ndarray:
 # (pure numpy; nmdb_n2p_paper_metrics.py reuses these for finished runs)
 PAPER_METRIC_SPLITS = ("train", "val", "test", "all")
 PAPER_METRIC_COLUMNS = (
-    "split", "n_days", "n_cells", "R2_paper", "R2_per_bin_mean",
-    "MAE", "MPE_percent", "RMSE", "chi2dof_total", "chi2dof_daily",
+    "split", "n_days", "n_cells",
+    "MAE", "MPE_percent", "RMSE", "R2_paper", "chi2dof_total",
 )
 
 
@@ -714,48 +758,44 @@ def _chi2dof(diff, sigma):
     return float(per_day.mean())
 
 
-def paper_metrics(true_flux, pred_flux, sig_total=None, sig_daily=None) -> dict:
+def paper_metrics(true_flux, pred_flux, sig_total=None) -> dict:
     """Five metrics of Zhao et al. 2026 on one set of (day, bin) cells, physical
-    flux. n = days x bins (all cells pooled), as the paper reports one number.
+    flux, in the order MAE, MPE, RMSE, R^2, chi^2/dof. Aggregation as inferred
+    from the paper's published daily predictions
+    (paper_compare/infer_zhao_metric_definitions.py): one day (its bins) is one
+    sample; MAE, MPE, RMSE and chi2/dof are computed per day over its bins and
+    then averaged over days; R^2 pools all cells with the global mean.
+      MAE / RMSE      flux units, per day then mean over days
+      MPE_percent     %, sign pred - true (negative = under-prediction)
       R2_paper        1 - sum(diff^2) / sum((y - mean(all cells))^2)  (Eq. 4;
                       pooled over bins, so dominated by the bin-to-bin spread)
-      R2_per_bin_mean R^2 of each bin over its days, then averaged over bins
-      MAE / RMSE      flux units; MPE in %, sign: pred - true (negative =
-                      under-prediction, as in the paper)
-      chi2dof_*       sigma = AMS total / daily error, see _chi2dof"""
+      chi2dof_total   sigma = AMS stat (+) total syst, dof = bins per day (p=0),
+                      see _chi2dof"""
     t = np.asarray(true_flux, dtype=np.float64)
     p = np.asarray(pred_flux, dtype=np.float64)
     diff = p - t
-    ss_res_bin = np.sum(diff ** 2, axis=0)
-    ss_tot_bin = np.sum((t - t.mean(axis=0)) ** 2, axis=0)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        r2_bin = 1.0 - ss_res_bin / ss_tot_bin
     return {
         "n_days": int(t.shape[0]),
         "n_cells": int(t.size),
+        "MAE": float(np.nanmean(np.nanmean(np.abs(diff), axis=1))),
+        "MPE_percent": float(np.nanmean(np.nanmean(diff / t, axis=1)) * 100.0),
+        "RMSE": float(np.nanmean(np.sqrt(np.nanmean(diff ** 2, axis=1)))),
         "R2_paper": float(1.0 - np.sum(diff ** 2) / np.sum((t - t.mean()) ** 2)),
-        "R2_per_bin_mean": float(np.nanmean(r2_bin)),
-        "MAE": float(np.mean(np.abs(diff))),
-        "MPE_percent": float(np.mean(diff / t) * 100.0),
-        "RMSE": float(np.sqrt(np.mean(diff ** 2))),
         "chi2dof_total": _chi2dof(diff, sig_total),
-        "chi2dof_daily": _chi2dof(diff, sig_daily),
     }
 
 
-def paper_metrics_by_split(true_by, pred_by, rows_by, sig_total, sig_daily) -> dict:
+def paper_metrics_by_split(true_by, pred_by, rows_by, sig_total) -> dict:
     """paper_metrics for train / val / test and for all days pooled.
     rows_by[name] = rows of the proton meta (to pick the AMS errors)."""
     pick = lambda sig, rows: None if sig is None else sig[np.asarray(rows)]
     out = {}
     for name in ("train", "val", "test"):
         out[name] = paper_metrics(true_by[name], pred_by[name],
-                                  pick(sig_total, rows_by[name]),
-                                  pick(sig_daily, rows_by[name]))
+                                  pick(sig_total, rows_by[name]))
     cat = lambda d: np.concatenate([d[n] for n in ("train", "val", "test")])
     rows_all = np.concatenate([np.asarray(rows_by[n]) for n in ("train", "val", "test")])
-    out["all"] = paper_metrics(cat(true_by), cat(pred_by),
-                               pick(sig_total, rows_all), pick(sig_daily, rows_all))
+    out["all"] = paper_metrics(cat(true_by), cat(pred_by), pick(sig_total, rows_all))
     return out
 
 
@@ -772,6 +812,61 @@ def write_paper_metrics(out_dir: Path, pm: dict) -> tuple[Path, Path]:
             if name in pm:
                 w.writerow([name] + [pm[name][c] for c in PAPER_METRIC_COLUMNS[1:]])
     return json_path, csv_path
+
+
+def write_loss_weight_table(out_dir, bins, R, eps, train_idx, test_idx, c_used,
+                            test_true, test_pred, weighted, unit="GV"):
+    """loss_weight_per_bin.csv: per bin, how much one unit of relative error
+    costs in the loss, without and with the error weight.
+
+    The target is MinMax(log10 flux), so a relative error r costs
+      unweighted : r^2 / (R_k ln10)^2                -> weight_unweighted
+      weighted   : w_ik r^2 / (R_k ln10)^2 = r^2 / (c eps_ik^2)
+                                                     -> weight_weighted (train mean)
+    with w_ik = (R_k ln10 / eps_ik)^2 / c, c = train mean of the raw weight (the
+    value used in training, or computed the same way if the run was unweighted).
+    *_rel1 = divided by bin 1. test_loss_share_* = share of the test loss per
+    bin (%), using this model's test residuals ln(pred/true)."""
+    import csv as _csv
+
+    ln10 = np.log(10.0)
+    R = np.asarray(R, dtype=np.float64)
+    eps = np.asarray(eps, dtype=np.float64).copy()
+    bad = ~np.isfinite(eps) | (eps <= 0)
+    if bad.any():
+        med = np.nanmedian(np.where(bad, np.nan, eps), axis=0)
+        eps = np.where(bad, med[None, :], eps)
+    train_idx, test_idx = np.asarray(train_idx), np.asarray(test_idx)
+    raw = ((R * ln10)[None, :] / eps) ** 2
+    c = float(c_used) if c_used is not None else float(np.mean(raw[train_idx]))
+    u = 1.0 / (R * ln10) ** 2
+    v = np.mean(1.0 / (c * eps[train_idx] ** 2), axis=0)
+    mean_w = np.mean(raw[train_idx] / c, axis=0)
+    dln2 = np.log(np.asarray(test_pred) / np.asarray(test_true)) ** 2
+    su = np.mean(dln2, axis=0) * u
+    sw = np.mean(dln2 / (c * eps[test_idx] ** 2), axis=0)
+    su, sw = su / su.sum() * 100.0, sw / sw.sum() * 100.0
+    eps_med = np.median(eps[train_idx], axis=0)
+    cols = ("bin", "lo", "hi", "R_k", "eps_median", "weight_unweighted", "weight_weighted",
+            "weight_unweighted_rel1", "weight_weighted_rel1", "mean_w_train",
+            "test_loss_share_unweighted", "test_loss_share_weighted")
+    rows = []
+    for k in range(len(R)):
+        rows.append([k + 1, bins[k][0], bins[k][1], R[k], eps_med[k], u[k], v[k],
+                     u[k] / u[0], v[k] / v[0], mean_w[k], su[k], sw[k]])
+    out_dir = Path(out_dir)
+    path = out_dir / "loss_weight_per_bin.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        wr = _csv.writer(fh)
+        fh.write(f"# trained {'WITH' if weighted else 'WITHOUT'} the error weight; "
+                 f"c = {c:.8g}{'' if weighted else ' (hypothetical: as if weighted)'}; "
+                 f"bins in {unit}\n")
+        wr.writerow(cols)
+        for r in rows:
+            wr.writerow([r[0]] + [f"{x:.8g}" for x in r[1:]])
+    print(f"loss weight per bin -> {path}")
+    return {"file": str(path), "trained_weighted": bool(weighted), "c": c,
+            "columns": list(cols), "rows": [[float(x) for x in r] for r in rows]}
 
 
 def make_test_diagnostic_plots(
@@ -1662,7 +1757,6 @@ def main() -> int:
         true_by_split, pred_by_split,
         {"train": train_idx, "val": val_idx, "test": test_idx},
         read_proton_sigma(args.proton_meta, "total", len(proton_dates)),
-        read_proton_sigma(args.proton_meta, "daily", len(proton_dates)),
     )
     paper_json, paper_csv = write_paper_metrics(args.output_dir, paper)
     for name in PAPER_METRIC_SPLITS:
@@ -1703,6 +1797,15 @@ def main() -> int:
         except Exception as exc:
             print(f"[skip test diagnostic plots] {exc}")
 
+    lw_table = None
+    if y_is_log10:
+        eps_tab = eps if use_w else read_proton_daily_relerr(args.proton_meta, kind=args.ams_err)
+        if eps_tab is not None and eps_tab.shape == y_log.shape:
+            lw_table = write_loss_weight_table(
+                args.output_dir, read_bins(args.proton_meta),
+                scaler_y.data_max_ - scaler_y.data_min_, eps_tab, train_idx, test_idx,
+                loss_weight_c, true_by_split["test"], pred_by_split["test"], use_w,
+                unit=PLOT_LABELS["unit"])
     summary = {
         "framework": "pytorch",
         "torch_version": torch.__version__,
@@ -1753,6 +1856,7 @@ def main() -> int:
         "metrics": metrics,
         # Zhao et al. 2026 metrics, also in paper_metrics.{json,csv}
         "paper_metrics": paper,
+        "loss_weight_per_bin": lw_table,
         "outputs": {
             "model_dir": str(model_dir),
             "checkpoint": str(ckpt_path),
